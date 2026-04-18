@@ -76,6 +76,60 @@ html, body {
 #compare-btn:hover:not(:disabled) { border-color: var(--accent); }
 #compare-btn:disabled { opacity: 0.4; cursor: default; }
 
+/* ---- Help button ---- */
+#help-btn {
+  background: var(--bg3); border: 1px solid var(--border2); color: var(--text3);
+  width: 26px; height: 26px; border-radius: 50%; cursor: pointer;
+  font-size: 0.82rem; font-weight: 700; line-height: 1;
+  transition: border-color 0.15s, color 0.15s; flex-shrink: 0;
+}
+#help-btn:hover { border-color: var(--accent); color: var(--text); }
+
+/* ---- Help modal ---- */
+#help-modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.68);
+  display: flex; align-items: center; justify-content: center; z-index: 200;
+}
+.help-box {
+  background: var(--bg1); border: 1px solid var(--border2); border-radius: 12px;
+  width: 560px; max-width: calc(100vw - 32px); max-height: 80vh;
+  display: flex; flex-direction: column; position: relative;
+}
+.help-close {
+  position: absolute; top: 10px; right: 14px;
+  background: none; border: none; color: var(--text3); cursor: pointer;
+  font-size: 1.3rem; line-height: 1; padding: 0;
+}
+.help-close:hover { color: var(--text); }
+.help-tab-bar {
+  display: flex; border-bottom: 1px solid var(--border); padding: 0 16px; flex-shrink: 0;
+}
+.help-tab {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--text3); cursor: pointer; padding: 11px 14px;
+  font-size: 0.8rem; font-family: var(--font); margin-bottom: -1px;
+  transition: color 0.12s, border-color 0.12s;
+}
+.help-tab:hover { color: var(--text); }
+.help-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.help-content {
+  padding: 20px 22px; overflow-y: auto; font-size: 0.84rem;
+  line-height: 1.75; color: var(--text2);
+}
+.help-content h3 { color: var(--text); font-size: 0.92rem; margin: 0 0 12px; }
+.help-content h4 {
+  color: var(--text); font-size: 0.78rem; margin: 16px 0 6px;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.help-content p { margin: 0 0 10px; }
+.help-content ul { margin: 0 0 10px; padding-left: 18px; }
+.help-content li { margin-bottom: 5px; }
+.help-stage-grid {
+  display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px;
+  margin: 8px 0 12px;
+}
+.help-stage-label { color: var(--accent); font-weight: 600; white-space: nowrap; }
+
 /* ---- Corpus panel ---- */
 #corpus-panel { padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--bg1); flex-shrink: 0; }
 .corpus-header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
@@ -315,7 +369,7 @@ canvas.loss-chart { display: block; width: 100%; height: 180px; }
 
   <div class="landing-explainer">
     <p>Tapasya runs three progressively sophisticated training regimes on your text corpus — byte-level minimal, byte-level with more compute, and BPE-tokenized — using only forward passes (no backprop). Each stage's output motivates the next stage's addition.</p>
-    <p>The algorithm is EGGROLL (evolution strategies) by Isaac 2025. Your corpus never leaves the tab.</p>
+    <p>The algorithm is <a href="https://arxiv.org/abs/2511.16652" target="_blank" rel="noopener" style="color:var(--accent);">EGGROLL</a> — evolution strategies without backprop. Your corpus never leaves the tab.</p>
   </div>
 </div>
 
@@ -331,6 +385,7 @@ canvas.loss-chart { display: block; width: 100%; height: 180px; }
     <span id="stages-label"></span>
     <div class="top-spacer"></div>
     <button id="compare-btn" disabled title="Complete at least two stages to compare">Compare ↔</button>
+    <button id="help-btn" onclick="openHelp()" title="Help">?</button>
   </div>
 
   <!-- Corpus panel -->
@@ -533,6 +588,73 @@ canvas.loss-chart { display: block; width: 100%; height: 180px; }
 
 </div><!-- /app-shell -->
 
+<!-- Help modal -->
+<div id="help-modal" style="display:none;" onclick="if(event.target===this)closeHelp()">
+  <div class="help-box">
+    <button class="help-close" onclick="closeHelp()">×</button>
+    <div class="help-tab-bar">
+      <button class="help-tab active" data-tab="what" onclick="switchHelpTab('what')">What is this?</button>
+      <button class="help-tab" data-tab="guided" onclick="switchHelpTab('guided')">Guided tour</button>
+      <button class="help-tab" data-tab="free" onclick="switchHelpTab('free')">Free mode</button>
+    </div>
+
+    <div class="help-content" id="help-what">
+      <h3>Tapasya — train a language model in your browser</h3>
+      <p><em>Tapasya</em> (Sanskrit: तपस्य — "disciplined practice") runs three training experiments on your text, entirely in this tab. Nothing is sent to a server. No account needed.</p>
+      <h4>The algorithm</h4>
+      <p>Training uses <strong><a href="https://arxiv.org/abs/2511.16652" target="_blank" rel="noopener" style="color:var(--accent);">EGGROLL</a></strong> (arXiv:2511.16652) — evolution strategies, forward passes only, no backprop. A population of slightly-perturbed model copies are evaluated; the ones that produced lower loss pull the weights in their direction. Implemented in plain JS + WGSL shaders, no ML framework.</p>
+      <h4>The three stages</h4>
+      <div class="help-stage-grid">
+        <span class="help-stage-label">Stage 1</span><span>Raw bytes, 500 steps. Does the algorithm work at all?</span>
+        <span class="help-stage-label">Stage 2</span><span>Same bytes, 2000 steps. What does more compute add?</span>
+        <span class="help-stage-label">Stage 3</span><span>BPE sub-word tokens, 2000 steps. What does a better vocabulary add?</span>
+      </div>
+      <h4>Your corpus</h4>
+      <p>Paste any plain text — a novel chapter, Wikipedia article, your own writing. Around 10 KB is ideal. The model learns <em>your</em> text's patterns, nothing else.</p>
+      <h4>Hardware</h4>
+      <p>WebGPU acceleration is used automatically in Chrome, Edge, and Safari on a machine with a GPU. Falls back to CPU — training just takes longer.</p>
+    </div>
+
+    <div class="help-content" id="help-guided" style="display:none;">
+      <h3>Guided tour</h3>
+      <p>Guided mode walks the stages in order with teaching copy explaining what each stage adds and why. Settings are locked to defaults so you can focus on watching the model learn.</p>
+      <h4>Flow</h4>
+      <ul>
+        <li>Paste your corpus, then click <strong>Start</strong> on Stage 1.</li>
+        <li>Stage 2 unlocks automatically at <strong>300 steps</strong> of Stage 1.</li>
+        <li>Stage 3 unlocks at <strong>1000 steps</strong> of Stage 2.</li>
+        <li><strong>Compare mode</strong> unlocks when any two stages have finished.</li>
+      </ul>
+      <h4>What you'll see</h4>
+      <ul>
+        <li><strong>Loss chart</strong> — the model's prediction error, going down over time. Lower is better.</li>
+        <li><strong>Samples</strong> — text the model generates every 10 steps. Watch it go from noise toward structure.</li>
+        <li><strong>Teaching copy</strong> — the blue strip explains what this stage's lever adds.</li>
+      </ul>
+      <h4>Resuming</h4>
+      <p>Training is checkpointed to your browser's local storage every 50 steps. Close the tab, reopen it, paste the same corpus — you'll be offered to resume where you left off.</p>
+    </div>
+
+    <div class="help-content" id="help-free" style="display:none;">
+      <h3>Free mode</h3>
+      <p>All three stages are open from the start. Adjust any setting before clicking Start.</p>
+      <h4>Settings</h4>
+      <ul>
+        <li><strong>Steps</strong> — how many training steps to run.</li>
+        <li><strong>Pop size</strong> — perturbed copies per step. Higher = better gradient estimate, slower per step.</li>
+        <li><strong>σ (sigma)</strong> — perturbation scale. Too high → unstable; too low → no signal. Default 0.05 works well.</li>
+        <li><strong>LR</strong> — how aggressively weights are adjusted from the fitness signal.</li>
+        <li><strong>Batch size</strong> — context windows evaluated per step. Higher = less noisy loss, slower.</li>
+        <li><strong>Seed</strong> — RNG seed. Same seed + same corpus → deterministic run.</li>
+      </ul>
+      <h4>Compare mode</h4>
+      <p>After any two stages have completed, the Compare button in the top bar activates. It generates text from all three models side-by-side with the same seed prompt — the clearest way to see what each addition buys.</p>
+      <h4>Resuming and resetting</h4>
+      <p>Checkpoints are saved every 50 steps. Use <strong>Reset</strong> on a stage to clear its checkpoint and start over from scratch.</p>
+    </div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div id="toast"></div>
 
@@ -625,6 +747,47 @@ window.updateStageUI = function(stage) {
 
 // Make switchStage global
 window.switchStage = switchStage;
+
+// ---- Help modal ----
+window.openHelp = function() {
+  $('help-modal').style.display = 'flex';
+  saveHelpSeen();
+};
+window.closeHelp = function() {
+  $('help-modal').style.display = 'none';
+};
+window.switchHelpTab = function(tab) {
+  document.querySelectorAll('.help-tab').forEach(el =>
+    el.classList.toggle('active', el.dataset.tab === tab));
+  $('help-what').style.display   = tab === 'what'   ? 'block' : 'none';
+  $('help-guided').style.display = tab === 'guided' ? 'block' : 'none';
+  $('help-free').style.display   = tab === 'free'   ? 'block' : 'none';
+};
+
+async function saveHelpSeen() {
+  try {
+    const root = await navigator.storage.getDirectory();
+    const dir  = await root.getDirectoryHandle('tapasya', { create: true });
+    const fh   = await dir.getFileHandle('prefs.json', { create: true });
+    let prefs  = {};
+    try { prefs = JSON.parse(await (await fh.getFile()).text()); } catch {}
+    prefs.helpSeen = true;
+    const w = await fh.createWritable(); await w.write(JSON.stringify(prefs)); await w.close();
+  } catch {}
+}
+
+async function isHelpSeen() {
+  try {
+    const root = await navigator.storage.getDirectory();
+    const dir  = await root.getDirectoryHandle('tapasya', { create: false });
+    const fh   = await dir.getFileHandle('prefs.json');
+    return !!(JSON.parse(await (await fh.getFile()).text())).helpSeen;
+  } catch { return false; }
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
+  if (!await isHelpSeen()) openHelp();
+});
 </script>
 </body>
 </html>

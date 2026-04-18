@@ -18,7 +18,7 @@ After any two stages complete, **Compare mode** lets you generate text from all 
 
 ## The algorithm
 
-**EGGROLL** (Evolution Strategies) by Isaac 2025. Forward-only training: a population of perturbed model copies are evaluated, fitness is z-score normalised, and a gradient estimate is computed by resampling the same perturbations. No autograd. No backprop. Works entirely in JavaScript and WGSL.
+**EGGROLL** — [Evolution Strategies at the Hyperscale](https://arxiv.org/abs/2511.16652) (arXiv:2511.16652, 2025). Forward-only training: a population of perturbed model copies are evaluated, fitness is z-score normalised, and a gradient estimate is computed by resampling the same perturbations. No autograd. No backprop. Tapasya implements a simplified isotropic-perturbation variant in plain JS + WGSL; the paper's low-rank trick is not used.
 
 ## How to run
 
@@ -36,7 +36,7 @@ For WebGPU acceleration, use Chrome or Edge on a machine with a GPU. Falls back 
 
 ## Tech
 
-- **EGGROLL** — forward-only evolution strategies, hand-rolled in ~400 lines of JS
+- **EGGROLL** — isotropic-perturbation ES, inspired by [arXiv:2511.16652](https://arxiv.org/abs/2511.16652)
 - **WebGPU** — GPU-accelerated forward pass + cross-entropy via custom WGSL kernels
 - **BPE tokenizer** — hand-rolled `trainBPE` / `bpeEncode` / `bpeDecode`, ~60 lines
 - **OPFS** — checkpoint save/restore so training survives a page reload
