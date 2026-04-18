@@ -1,7 +1,4 @@
 *
 !index.html
-!main.js
-!worker.js
-!shaders.wgsl
 !README.md
 !.gitignore

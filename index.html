@@ -664,7 +664,1864 @@ canvas.loss-chart { display: block; width: 100%; height: 180px; }
   <a href="https://github.com/NakliTechie/Tapasya">⌨ Source</a>
 </div>
 
-<script src="main.js"></script>
+<!-- ── Worker source (embedded) ──────────────────────────────────────── -->
+<!-- Browser ignores <script type="text/worker">; JS reads .textContent -->
+<script type="text/worker" id="worker-src">
+'use strict';
+
+// ── Inlined WGSL shaders ──────────────────────────────────────────────
+const SHADER_SRC = `
+// Tapasya — WebGPU compute shaders
+// Phase 2: forward pass kernels (matmul, attention, LayerNorm, GELU, embed, loss)
+//
+// All entry points share one bind group layout (group 0, bindings 0-5).
+// The JS side always provides all 6 bindings; unused slots get a 4-byte dummy buffer.
+//
+//   binding 0 — uniform Cfg { x, y, z, w: u32 }  (dimensions, meaning varies per op)
+//   binding 1 — storage read  f32_a               (primary float input)
+//   binding 2 — storage read  f32_b               (second float input)
+//   binding 3 — storage read  f32_c               (third float input)
+//   binding 4 — storage r/w   f32_out             (output, also used for in-place ops)
+//   binding 5 — storage read  u32_a               (u32 input: token ids / loss targets)
+
+struct Cfg { x: u32, y: u32, z: u32, w: u32 }
+
+@group(0) @binding(0) var<uniform>             cfg:     Cfg;
+@group(0) @binding(1) var<storage, read>       f32_a:   array<f32>;
+@group(0) @binding(2) var<storage, read>       f32_b:   array<f32>;
+@group(0) @binding(3) var<storage, read>       f32_c:   array<f32>;
+@group(0) @binding(4) var<storage, read_write> f32_out: array<f32>;
+@group(0) @binding(5) var<storage, read>       u32_a:   array<u32>;
+
+// ── 1. embed_add ─────────────────────────────────────────────────
+// out[T,D] = embed[token[t], D] + pos_embed[t, D]
+// cfg: x=T  y=D
+// u32_a=tokens[T]  f32_a=embed[V*D]  f32_b=pos_embed[ctx*D]  f32_out=x[T*D]
+@compute @workgroup_size(64)
+fn embed_add(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  let T = cfg.x; let D = cfg.y;
+  if (i >= T * D) { return; }
+  let t   = i / D;
+  let d   = i % D;
+  let tok = u32_a[t];
+  f32_out[i] = f32_a[tok * D + d] + f32_b[t * D + d];
+}
+
+// ── 2. matmul ────────────────────────────────────────────────────
+// out[M,N] = A[M,K] × B[K,N]
+// cfg: x=M  y=K  z=N
+// f32_a=A  f32_b=B  f32_out=C
+@compute @workgroup_size(8, 8)
+fn matmul(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let n = gid.x; let m = gid.y;
+  let M = cfg.x; let K = cfg.y; let N = cfg.z;
+  if (m >= M || n >= N) { return; }
+  var acc = 0.0f;
+  for (var k = 0u; k < K; k++) {
+    acc += f32_a[m * K + k] * f32_b[k * N + n];
+  }
+  f32_out[m * N + n] = acc;
+}
+
+// ── 3. matmul_bt ─────────────────────────────────────────────────
+// out[M,N] = A[M,K] × B^T  where B is stored [N,K]
+// Used for weight-tied logits: finalH[T,D] × embed^T  (embed stored [V,D])
+// cfg: x=M  y=K  z=N
+// f32_a=A[M*K]  f32_b=B[N*K]  f32_out=C[M*N]
+@compute @workgroup_size(8, 8)
+fn matmul_bt(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let n = gid.x; let m = gid.y;
+  let M = cfg.x; let K = cfg.y; let N = cfg.z;
+  if (m >= M || n >= N) { return; }
+  var acc = 0.0f;
+  for (var k = 0u; k < K; k++) {
+    acc += f32_a[m * K + k] * f32_b[n * K + k];
+  }
+  f32_out[m * N + n] = acc;
+}
+
+// ── 4. layer_norm ─────────────────────────────────────────────────
+// out[T,D] = LayerNorm(X[T,D], gain[D], bias[D])
+// cfg: x=T  y=D
+// f32_a=X[T*D]  f32_b=gain[D]  f32_c=bias[D]  f32_out=Y[T*D]
+@compute @workgroup_size(1)
+fn layer_norm(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let t = gid.x;
+  let T = cfg.x; let D = cfg.y;
+  if (t >= T) { return; }
+  let off = t * D;
+  var mean = 0.0f;
+  for (var d = 0u; d < D; d++) { mean += f32_a[off + d]; }
+  mean /= f32(D);
+  var v = 0.0f;
+  for (var d = 0u; d < D; d++) {
+    let diff = f32_a[off + d] - mean;
+    v += diff * diff;
+  }
+  let inv_std = inverseSqrt(v / f32(D) + 1e-5);
+  for (var d = 0u; d < D; d++) {
+    f32_out[off + d] = f32_b[d] * (f32_a[off + d] - mean) * inv_std + f32_c[d];
+  }
+}
+
+// ── 5. residual_add ───────────────────────────────────────────────
+// out[N] = A[N] + B[N]
+// cfg: x=N
+// f32_a=A  f32_b=B  f32_out=C
+@compute @workgroup_size(64)
+fn residual_add(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= cfg.x) { return; }
+  f32_out[i] = f32_a[i] + f32_b[i];
+}
+
+// ── 6. gelu_inplace ───────────────────────────────────────────────
+// f32_out[N] = GELU(f32_out[N])  (read-modify-write)
+// cfg: x=N
+const SQRT_2_PI = 0.7978845608f;
+@compute @workgroup_size(64)
+fn gelu_inplace(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= cfg.x) { return; }
+  let x = f32_out[i];
+  f32_out[i] = 0.5f * x * (1.0f + tanh(SQRT_2_PI * (x + 0.044715f * x * x * x)));
+}
+
+// ── 7. causal_attn ────────────────────────────────────────────────
+// out[T,D] = causal multi-head attention(Q[T,D], K[T,D], V[T,D])
+// cfg: x=T  y=D  z=H
+// f32_a=Q  f32_b=K  f32_c=V  f32_out=attn_out
+// Dispatch: (1, T) workgroups with workgroup_size(H, 1)
+// → gid.x=head  gid.y=query_pos
+@compute @workgroup_size(4, 1)
+fn causal_attn(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let h = gid.x;
+  let i = gid.y;
+  let T = cfg.x; let D = cfg.y; let H = cfg.z;
+  if (h >= H || i >= T) { return; }
+  let dh    = D / H;
+  let scale = 1.0f / sqrt(f32(dh));
+  let h_off = h * dh;
+
+  // Compute attention scores for all past/current positions (causal mask)
+  var scores: array<f32, 128>;   // 128 = ctx_len (compile-time constant)
+  var mx = -1e9f;
+  for (var j = 0u; j <= i; j++) {
+    var s = 0.0f;
+    for (var d = 0u; d < dh; d++) {
+      s += f32_a[i * D + h_off + d] * f32_b[j * D + h_off + d];
+    }
+    s *= scale;
+    scores[j] = s;
+    if (s > mx) { mx = s; }
+  }
+
+  // Numerically stable softmax
+  var sum_exp = 0.0f;
+  for (var j = 0u; j <= i; j++) {
+    scores[j] = exp(scores[j] - mx);
+    sum_exp  += scores[j];
+  }
+  for (var j = 0u; j <= i; j++) { scores[j] /= sum_exp; }
+
+  // Weighted sum of V
+  for (var d = 0u; d < dh; d++) {
+    var val = 0.0f;
+    for (var j = 0u; j <= i; j++) {
+      val += scores[j] * f32_c[j * D + h_off + d];
+    }
+    f32_out[i * D + h_off + d] = val;
+  }
+}
+
+// ── 8. cross_entropy ─────────────────────────────────────────────
+// out[T] = per-position cross-entropy loss
+// cfg: x=T  y=V
+// f32_a=logits[T*V]  u32_a=targets[T]  f32_out=losses[T]
+@compute @workgroup_size(1)
+fn cross_entropy(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let t = gid.x;
+  let V = cfg.y;
+  if (t >= cfg.x) { return; }
+  let off = t * V;
+  var mx = -1e30f;
+  for (var v = 0u; v < V; v++) {
+    if (f32_a[off + v] > mx) { mx = f32_a[off + v]; }
+  }
+  var sum_exp = 0.0f;
+  for (var v = 0u; v < V; v++) { sum_exp += exp(f32_a[off + v] - mx); }
+  let tgt    = u32_a[t];
+  f32_out[t] = -(f32_a[off + tgt] - mx - log(sum_exp));
+}
+`;
+
+// ============================================================
+// COUNTER-BASED RNG  (no mutable global state)
+// ============================================================
+
+// SplitMix32 — one step of the mixing function
+function sm32(h) {
+  h = (Math.imul((h >>> 0) + 0x9e3779b9, 1)) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x85ebca6b) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+function hash2(a, b) { return sm32((sm32(a >>> 0) + (b >>> 0)) >>> 0); }
+
+// Gaussian for weight init — seeded by (seed, tensorId, elementIdx)
+function rngInitG(seed, tid, idx) {
+  const h = hash2(hash2(seed >>> 0, tid >>> 0), idx >>> 0);
+  const u1 = hash2(h, idx * 2 + 0) / 4294967296 + 1e-10;
+  const u2 = hash2(h, idx * 2 + 1) / 4294967296;
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+// Gaussian for ES perturbations — seeded by (seed, stage, step, popIdx, tensorId, elementIdx)
+function rngEps(seed, stage, step, pop, tid, idx) {
+  const h1 = hash2(hash2(seed >>> 0, (stage * 0x9e3779b9) >>> 0), (step * 0x6c62272e) >>> 0);
+  const h2 = hash2(hash2(h1, pop >>> 0), tid >>> 0);
+  const u1 = hash2(h2, idx * 2 + 0) / 4294967296 + 1e-10;
+  const u2 = hash2(h2, idx * 2 + 1) / 4294967296;
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+// Stateful LCG — only for batch sampling and sample generation (not training)
+function makeLcg(seed, stage, step) {
+  let s = sm32(sm32(seed >>> 0) ^ sm32((stage * 997 + step * 31 + 42) >>> 0));
+  return () => { s = sm32(s + 0x6c62272e); return s / 4294967296; };
+}
+
+// ============================================================
+// MODEL  (byte-level and BPE-tokenized — same transformer shape)
+// ============================================================
+
+function xavierFill(arr, fanIn, fanOut, seed, tid) {
+  const std = Math.sqrt(2 / (fanIn + fanOut));
+  for (let i = 0; i < arr.length; i++) arr[i] = rngInitG(seed, tid, i) * std;
+}
+
+function initModel(cfg, seed) {
+  const { vocab_size: V, d_model: D, n_heads: H, n_layers: L, d_ff: F } = cfg;
+  let tid = 0;
+
+  const embed     = new Float32Array(V * D); xavierFill(embed, V, D, seed, tid++);
+  const pos_embed = new Float32Array(cfg.ctx_len * D); xavierFill(pos_embed, cfg.ctx_len, D, seed, tid++);
+
+  const blocks = [];
+  for (let l = 0; l < L; l++) {
+    const wq = new Float32Array(D * D); xavierFill(wq, D, D, seed, tid++);
+    const wk = new Float32Array(D * D); xavierFill(wk, D, D, seed, tid++);
+    const wv = new Float32Array(D * D); xavierFill(wv, D, D, seed, tid++);
+    const wo = new Float32Array(D * D); xavierFill(wo, D, D, seed, tid++);
+    const ff1 = new Float32Array(D * F); xavierFill(ff1, D, F, seed, tid++);
+    const ff2 = new Float32Array(F * D); xavierFill(ff2, F, D, seed, tid++);
+    blocks.push({
+      ln1_g: new Float32Array(D).fill(1), ln1_b: new Float32Array(D),
+      wq, wk, wv, wo,
+      ln2_g: new Float32Array(D).fill(1), ln2_b: new Float32Array(D),
+      ff1, ff2
+    });
+  }
+
+  return { cfg, embed, pos_embed, blocks,
+           ln_f_g: new Float32Array(D).fill(1), ln_f_b: new Float32Array(D) };
+}
+
+// Ordered flat tensor list — index = tensor ID used by rngEps
+function modelTensors(m) {
+  const t = [m.embed, m.pos_embed];
+  for (const b of m.blocks)
+    t.push(b.wq, b.wk, b.wv, b.wo, b.ff1, b.ff2, b.ln1_g, b.ln1_b, b.ln2_g, b.ln2_b);
+  t.push(m.ln_f_g, m.ln_f_b);
+  return t;
+}
+
+// ============================================================
+// FORWARD PASS  (pure CPU, returns logits [T × V])
+// ============================================================
+
+// A[T,M] × B[M,N] → C[T,N]  (cache-friendly loop order)
+function matmul(A, B, T, M, N) {
+  const C = new Float32Array(T * N);
+  for (let t = 0; t < T; t++) {
+    const rA = t * M, rC = t * N;
+    for (let m = 0; m < M; m++) {
+      const a = A[rA + m], rB = m * N;
+      for (let n = 0; n < N; n++) C[rC + n] += a * B[rB + n];
+    }
+  }
+  return C;
+}
+
+function layerNorm(src, off, g, b, D, dst, dOff) {
+  let mean = 0;
+  for (let i = 0; i < D; i++) mean += src[off + i];
+  mean /= D;
+  let v = 0;
+  for (let i = 0; i < D; i++) v += (src[off + i] - mean) ** 2;
+  const std = Math.sqrt(v / D + 1e-5);
+  for (let i = 0; i < D; i++) dst[dOff + i] = g[i] * (src[off + i] - mean) / std + b[i];
+}
+
+function gelu(x) {
+  return 0.5 * x * (1 + Math.tanh(0.7978845608 * (x + 0.044715 * x * x * x)));
+}
+
+// Causal multi-head self-attention
+function attention(x, wq, wk, wv, wo, T, D, H) {
+  const dh = D / H, scale = 1 / Math.sqrt(dh);
+  const Q = matmul(x, wq, T, D, D);
+  const K = matmul(x, wk, T, D, D);
+  const V = matmul(x, wv, T, D, D);
+  const out = new Float32Array(T * D);
+
+  for (let h = 0; h < H; h++) {
+    const off = h * dh;
+    for (let i = 0; i < T; i++) {
+      const scores = new Float32Array(i + 1);
+      let mx = -Infinity;
+      for (let j = 0; j <= i; j++) {
+        let s = 0;
+        for (let d = 0; d < dh; d++) s += Q[i * D + off + d] * K[j * D + off + d];
+        scores[j] = s * scale;
+        if (scores[j] > mx) mx = scores[j];
+      }
+      let sum = 0;
+      for (let j = 0; j <= i; j++) { scores[j] = Math.exp(scores[j] - mx); sum += scores[j]; }
+      for (let j = 0; j <= i; j++) scores[j] /= sum;
+
+      for (let d = 0; d < dh; d++) {
+        let val = 0;
+        for (let j = 0; j <= i; j++) val += scores[j] * V[j * D + off + d];
+        out[i * D + off + d] = val;
+      }
+    }
+  }
+  return matmul(out, wo, T, D, D);
+}
+
+function forward(model, tokens) {
+  const { cfg, embed, pos_embed, blocks, ln_f_g, ln_f_b } = model;
+  const { vocab_size: V, d_model: D, n_heads: H, n_layers: L, d_ff: F } = cfg;
+  const T = tokens.length;
+
+  // Token + position embeddings
+  const x = new Float32Array(T * D);
+  for (let t = 0; t < T; t++)
+    for (let d = 0; d < D; d++)
+      x[t * D + d] = embed[tokens[t] * D + d] + pos_embed[t * D + d];
+
+  const buf = new Float32Array(T * D);
+  for (const { ln1_g, ln1_b, wq, wk, wv, wo, ln2_g, ln2_b, ff1, ff2 } of blocks) {
+    // Attention sublayer
+    for (let t = 0; t < T; t++) layerNorm(x, t * D, ln1_g, ln1_b, D, buf, t * D);
+    const attn = attention(buf, wq, wk, wv, wo, T, D, H);
+    for (let i = 0; i < T * D; i++) x[i] += attn[i];
+
+    // FFN sublayer
+    for (let t = 0; t < T; t++) layerNorm(x, t * D, ln2_g, ln2_b, D, buf, t * D);
+    const ff = matmul(buf, ff1, T, D, F);
+    for (let i = 0; i < ff.length; i++) ff[i] = gelu(ff[i]);
+    const ff2out = matmul(ff, ff2, T, F, D);
+    for (let i = 0; i < T * D; i++) x[i] += ff2out[i];
+  }
+
+  // Final LN + logits (weight-tied to embed)
+  const last = new Float32Array(D);
+  layerNorm(x, (T - 1) * D, ln_f_g, ln_f_b, D, last, 0);
+  const logits = new Float32Array(V);
+  for (let v = 0; v < V; v++) {
+    let s = 0;
+    for (let d = 0; d < D; d++) s += last[d] * embed[v * D + d];
+    logits[v] = s;
+  }
+  return logits; // [V]
+}
+
+// All-positions forward (for training loss)
+function forwardAll(model, tokens) {
+  const { cfg, embed, pos_embed, blocks, ln_f_g, ln_f_b } = model;
+  const { vocab_size: V, d_model: D, n_heads: H, n_layers: L, d_ff: F } = cfg;
+  const T = tokens.length;
+
+  const x = new Float32Array(T * D);
+  for (let t = 0; t < T; t++)
+    for (let d = 0; d < D; d++)
+      x[t * D + d] = embed[tokens[t] * D + d] + pos_embed[t * D + d];
+
+  const buf = new Float32Array(T * D);
+  for (const { ln1_g, ln1_b, wq, wk, wv, wo, ln2_g, ln2_b, ff1, ff2 } of blocks) {
+    for (let t = 0; t < T; t++) layerNorm(x, t * D, ln1_g, ln1_b, D, buf, t * D);
+    const attn = attention(buf, wq, wk, wv, wo, T, D, H);
+    for (let i = 0; i < T * D; i++) x[i] += attn[i];
+    for (let t = 0; t < T; t++) layerNorm(x, t * D, ln2_g, ln2_b, D, buf, t * D);
+    const ff = matmul(buf, ff1, T, D, F);
+    for (let i = 0; i < ff.length; i++) ff[i] = gelu(ff[i]);
+    const ff2out = matmul(ff, ff2, T, F, D);
+    for (let i = 0; i < T * D; i++) x[i] += ff2out[i];
+  }
+
+  // Apply final LN to all positions, then logits via weight tying: h · embed[v]
+  const finalH = new Float32Array(T * D);
+  for (let t = 0; t < T; t++) layerNorm(x, t * D, ln_f_g, ln_f_b, D, finalH, t * D);
+
+  // embed is [V, D]; logits[t, v] = Σ_d finalH[t, d] * embed[v, d]  (not a plain matmul)
+  const logits = new Float32Array(T * V);
+  for (let t = 0; t < T; t++) {
+    const hOff = t * D, lOff = t * V;
+    for (let v = 0; v < V; v++) {
+      let s = 0;
+      const eOff = v * D;
+      for (let d = 0; d < D; d++) s += finalH[hOff + d] * embed[eOff + d];
+      logits[lOff + v] = s;
+    }
+  }
+  return logits; // [T, V]
+}
+
+// ============================================================
+// LOSS
+// ============================================================
+
+// logits: [T, V]  targets: array-like [T]  returns scalar
+function crossEntropy(logits, targets, T, V) {
+  let loss = 0;
+  for (let t = 0; t < T; t++) {
+    const off = t * V;
+    let mx = -Infinity;
+    for (let v = 0; v < V; v++) if (logits[off + v] > mx) mx = logits[off + v];
+    let sum = 0;
+    for (let v = 0; v < V; v++) sum += Math.exp(logits[off + v] - mx);
+    loss += -(logits[off + targets[t]] - mx - Math.log(sum));
+  }
+  return loss / T;
+}
+
+function batchLoss(model, bx, by, B, SL) {
+  const V = model.cfg.vocab_size;
+  let total = 0;
+  for (let b = 0; b < B; b++) {
+    const x = bx.subarray(b * SL, (b + 1) * SL);
+    const y = by.subarray(b * SL, (b + 1) * SL);
+    const logits = forwardAll(model, x);
+    total += crossEntropy(logits, y, SL, V);
+  }
+  return total / B;
+}
+
+// ============================================================
+// BATCH SAMPLING
+// ============================================================
+
+function sampleBatch(tokens, B, SL, rng) {
+  const n = tokens.length;
+  const bx = new Uint32Array(B * SL);
+  const by = new Uint32Array(B * SL);
+  const maxStart = Math.max(1, n - SL);
+  for (let b = 0; b < B; b++) {
+    const start = Math.floor(rng() * maxStart);
+    for (let t = 0; t < SL; t++) {
+      bx[b * SL + t] = tokens[(start + t) % n];
+      by[b * SL + t] = tokens[(start + t + 1) % n];
+    }
+  }
+  return { bx, by };
+}
+
+// ============================================================
+// EGGROLL  (evolution strategies, forward-only)
+// ============================================================
+
+function eggrollStep(model, bx, by, cfg, step, stage) {
+  const { pop_size: P, sigma, lr, batch_size: B, seq_len: SL, seed } = cfg;
+  const tensors = modelTensors(model);
+  const rawFit  = new Float32Array(P); // fitness = -loss
+
+  // Evaluate population (antithetic pairs)
+  for (let p = 0; p < P / 2; p++) {
+    for (let sign = 1; sign >= -1; sign -= 2) {
+      const popIdx = p * 2 + (sign === 1 ? 0 : 1);
+
+      // Apply perturbation in-place
+      for (let tid = 0; tid < tensors.length; tid++) {
+        const W = tensors[tid];
+        for (let j = 0; j < W.length; j++) W[j] += sign * sigma * rngEps(seed, stage, step, p, tid, j);
+      }
+
+      rawFit[popIdx] = -batchLoss(model, bx, by, B, SL);
+
+      // Restore
+      for (let tid = 0; tid < tensors.length; tid++) {
+        const W = tensors[tid];
+        for (let j = 0; j < W.length; j++) W[j] -= sign * sigma * rngEps(seed, stage, step, p, tid, j);
+      }
+    }
+  }
+
+  // Z-score normalize fitnesses
+  let mean = 0;
+  for (let i = 0; i < P; i++) mean += rawFit[i];
+  mean /= P;
+  let std = 0;
+  for (let i = 0; i < P; i++) std += (rawFit[i] - mean) ** 2;
+  std = Math.sqrt(std / P);
+  const norm = new Float32Array(P);
+  for (let i = 0; i < P; i++) norm[i] = (rawFit[i] - mean) / (std + 1e-8);
+
+  // Weight update (regenerate eps — same RNG key → same values)
+  for (let tid = 0; tid < tensors.length; tid++) {
+    const W = tensors[tid];
+    for (let j = 0; j < W.length; j++) {
+      let g = 0;
+      for (let i = 0; i < P; i++) {
+        const p = Math.floor(i / 2);
+        const s = (i % 2 === 0) ? 1 : -1;
+        g += norm[i] * s * rngEps(seed, stage, step, p, tid, j);
+      }
+      W[j] += lr * g / (P * sigma);
+    }
+  }
+
+  return rawFit; // caller computes train_loss estimate
+}
+
+// ============================================================
+// SAMPLE GENERATION
+// ============================================================
+
+function generateSample(model, seedText, maxTokens, rng, temperature = 0.8, bpe = null) {
+  const V   = model.cfg.vocab_size;
+  const ctx = model.cfg.ctx_len;
+
+  // Encode seed
+  const buf = new Uint32Array(ctx);
+  let len = 0;
+  if (bpe) {
+    const enc = bpeEncode(seedText, bpe.merges);
+    for (let i = 0; i < enc.length && len < ctx; i++) buf[len++] = enc[i];
+  } else {
+    for (let i = 0; i < seedText.length && len < ctx; i++) buf[len++] = seedText.charCodeAt(i) & 0xff;
+  }
+  if (len === 0) buf[len++] = 10; // fallback: newline
+
+  const out = [];
+  for (let _ = 0; _ < maxTokens; _++) {
+    const ctxSlice = buf.subarray(0, len);
+    const logits   = forward(model, ctxSlice);
+
+    let tokenId;
+    if (temperature === 0) {
+      let best = 0;
+      for (let v = 1; v < V; v++) if (logits[v] > logits[best]) best = v;
+      tokenId = best;
+    } else {
+      // Temperature-scaled softmax sampling
+      let mx = -Infinity;
+      for (let v = 0; v < V; v++) if (logits[v] > mx) mx = logits[v];
+      let sum = 0;
+      const probs = new Float32Array(V);
+      for (let v = 0; v < V; v++) { probs[v] = Math.exp((logits[v] - mx) / temperature); sum += probs[v]; }
+      const u = rng() * sum;
+      let cum = 0;
+      tokenId = V - 1;
+      for (let v = 0; v < V; v++) { cum += probs[v]; if (u < cum) { tokenId = v; break; } }
+    }
+
+    out.push(tokenId);
+    // Slide context window
+    if (len < ctx) buf[len++] = tokenId;
+    else {
+      for (let i = 0; i < ctx - 1; i++) buf[i] = buf[i + 1];
+      buf[ctx - 1] = tokenId;
+    }
+  }
+
+  if (bpe) return bpeDecode(out, bpe.vocab);
+  try { return new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(out)); }
+  catch { return out.map(c => String.fromCharCode(c)).join(''); }
+}
+
+// ============================================================
+// CORPUS HANDLING
+// ============================================================
+
+function tokenizeBytes(text) {
+  const enc = new TextEncoder();
+  const bytes = enc.encode(text);
+  const tokens = new Uint32Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) tokens[i] = bytes[i];
+  return tokens;
+}
+
+// ============================================================
+// BPE TOKENIZER  (Stage 3 — hand-rolled, no external deps)
+// ============================================================
+
+function trainBPE(text, targetVocabSize) {
+  // Initialise vocab with all 256 bytes
+  const vocab = [];
+  for (let i = 0; i < 256; i++) vocab.push(String.fromCharCode(i));
+
+  // Byte-encode the full corpus
+  const bytes = new TextEncoder().encode(text);
+  let tokens  = Array.from(bytes);
+
+  const merges    = [];
+  const numMerges = targetVocabSize - 256;
+
+  for (let m = 0; m < numMerges; m++) {
+    // Count all consecutive pairs
+    const counts = new Map();
+    for (let i = 0; i < tokens.length - 1; i++) {
+      const k = tokens[i] * 65536 + tokens[i + 1];
+      counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    if (counts.size === 0) break;
+
+    // Best pair by frequency (ties broken by key value for determinism)
+    let bestKey = -1, bestCnt = 1; // require >=2 occurrences
+    for (const [k, v] of counts) {
+      if (v > bestCnt || (v === bestCnt && (bestKey === -1 || k < bestKey))) {
+        bestCnt = v; bestKey = k;
+      }
+    }
+    if (bestKey === -1) break; // nothing appears >=2 times
+
+    const a = (bestKey / 65536) | 0;
+    const b =  bestKey % 65536;
+    const newId = 256 + m;
+    merges.push([a, b]);
+    vocab.push(vocab[a] + vocab[b]);
+
+    // Apply merge (single left-to-right pass)
+    const next = [];
+    let i = 0;
+    while (i < tokens.length) {
+      if (i < tokens.length - 1 && tokens[i] === a && tokens[i + 1] === b) {
+        next.push(newId); i += 2;
+      } else {
+        next.push(tokens[i]); i++;
+      }
+    }
+    tokens = next;
+  }
+
+  return { merges, vocab };
+}
+
+// Encode a string to BPE token ids (apply merges in training order)
+function bpeEncode(text, merges) {
+  const bytes = new TextEncoder().encode(text);
+  let tokens  = Array.from(bytes);
+
+  for (let i = 0; i < merges.length; i++) {
+    const [a, b] = merges[i];
+    const newId  = 256 + i;
+    const next   = [];
+    let j = 0;
+    while (j < tokens.length) {
+      if (j < tokens.length - 1 && tokens[j] === a && tokens[j + 1] === b) {
+        next.push(newId); j += 2;
+      } else {
+        next.push(tokens[j]); j++;
+      }
+    }
+    tokens = next;
+  }
+
+  return new Uint32Array(tokens);
+}
+
+function bpeDecode(tokens, vocab) {
+  return tokens.map(t => vocab[t] ?? '?').join('');
+}
+
+async function hashCorpus(text) {
+  try {
+    const bytes = new TextEncoder().encode(text);
+    const buf   = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(buf).slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    // FNV-1a fallback (Node.js testing)
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    return h.toString(16).padStart(8, '0');
+  }
+}
+
+// ============================================================
+// MODEL SERIALIZATION
+// ============================================================
+
+function serializeModel(m) {
+  return {
+    config: m.cfg,
+    embed:     Array.from(m.embed),
+    pos_embed: Array.from(m.pos_embed),
+    blocks: m.blocks.map(b => ({
+      wq: Array.from(b.wq), wk: Array.from(b.wk), wv: Array.from(b.wv), wo: Array.from(b.wo),
+      ff1: Array.from(b.ff1), ff2: Array.from(b.ff2),
+      ln1_g: Array.from(b.ln1_g), ln1_b: Array.from(b.ln1_b),
+      ln2_g: Array.from(b.ln2_g), ln2_b: Array.from(b.ln2_b)
+    })),
+    ln_f_g: Array.from(m.ln_f_g), ln_f_b: Array.from(m.ln_f_b)
+  };
+}
+
+function deserializeModel(d) {
+  return {
+    cfg:       d.config,
+    embed:     new Float32Array(d.embed),
+    pos_embed: new Float32Array(d.pos_embed),
+    blocks: d.blocks.map(b => ({
+      wq: new Float32Array(b.wq), wk: new Float32Array(b.wk),
+      wv: new Float32Array(b.wv), wo: new Float32Array(b.wo),
+      ff1: new Float32Array(b.ff1), ff2: new Float32Array(b.ff2),
+      ln1_g: new Float32Array(b.ln1_g), ln1_b: new Float32Array(b.ln1_b),
+      ln2_g: new Float32Array(b.ln2_g), ln2_b: new Float32Array(b.ln2_b)
+    })),
+    ln_f_g: new Float32Array(d.ln_f_g), ln_f_b: new Float32Array(d.ln_f_b)
+  };
+}
+
+// ============================================================
+// OPFS CHECKPOINT
+// ============================================================
+
+async function opfsDir() {
+  const root = await navigator.storage.getDirectory();
+  return root.getDirectoryHandle('tapasya', { create: true });
+}
+
+async function saveCheckpointOPFS(stage, st) {
+  try {
+    const dir = await opfsDir();
+    const fh  = await dir.getFileHandle(`stage-${stage}.json`, { create: true });
+    const w   = await fh.createWritable();
+    const payload = {
+      stage, step: st.step,
+      model: serializeModel(st.model),
+      config: st.cfg,
+      history: st.history,
+      sample_history: st.sampleHistory,
+      rng_state: 0, // counter-based RNG needs no state
+      corpus_hash: st.corpusHash,
+      bpe: st.bpe || null,
+    };
+    await w.write(JSON.stringify(payload));
+    await w.close();
+  } catch (e) {
+    console.warn('[tapasya] OPFS save failed:', e);
+  }
+}
+
+async function loadCheckpointOPFS(stage) {
+  try {
+    const dir = await opfsDir();
+    const fh  = await dir.getFileHandle(`stage-${stage}.json`);
+    const f   = await fh.getFile();
+    return JSON.parse(await f.text());
+  } catch { return null; }
+}
+
+async function deleteCheckpointOPFS(stage) {
+  try {
+    const dir = await opfsDir();
+    await dir.removeEntry(`stage-${stage}.json`);
+  } catch {}
+}
+
+// ============================================================
+// PER-STAGE STATE  (worker owns all three)
+// ============================================================
+
+const DEFAULT_CFG = {
+  pop_size:   16,
+  sigma:      0.05,
+  lr:         0.003,
+  batch_size: 8,
+  seq_len:    128,
+  seed:       42,
+  val_split:  0.1
+};
+
+const STAGE_STEPS = { 1: 500, 2: 2000, 3: 2000 };
+
+function makeModelCfg(stage) {
+  return { vocab_size: stage === 3 ? 2000 : 256, d_model: 64, n_heads: 4, n_layers: 4, ctx_len: 128, d_ff: 256 };
+}
+
+// stages[1|2|3] → { model, trainTokens, valTokens, cfg, step, running, history, sampleHistory, corpusHash }
+const stages = {};
+
+// Active training loop handle
+let activeStage = null;
+let pauseFlag   = false;
+
+// ============================================================
+// GPU BACKEND  (WebGPU accelerated forward pass — CPU fallback if unavailable)
+// ============================================================
+
+let gpuCtx       = undefined; // undefined=not tried, null=failed/no WebGPU, obj=ready
+let gpuModelBufs = null;      // model weights uploaded to GPU for the active stage
+
+async function initWebGPU() {
+  if (typeof navigator === 'undefined' || !navigator.gpu) return null;
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return null;
+    const device  = await adapter.requestDevice();
+
+    const mod = device.createShaderModule({ code: SHADER_SRC });
+    const inf  = await mod.getCompilationInfo();
+    if (inf.messages.some(m => m.type === 'error')) {
+      console.error('[GPU] shader errors:', inf.messages.filter(m => m.type === 'error'));
+      return null;
+    }
+
+    const bgl = device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+    ]});
+    const plo  = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
+    const mkPL = ep => device.createComputePipeline({
+      layout: plo, compute: { module: mod, entryPoint: ep }
+    });
+    const pl = {
+      embed_add:    mkPL('embed_add'),
+      matmul:       mkPL('matmul'),
+      matmul_bt:    mkPL('matmul_bt'),
+      layer_norm:   mkPL('layer_norm'),
+      residual_add: mkPL('residual_add'),
+      gelu_inplace: mkPL('gelu_inplace'),
+      causal_attn:  mkPL('causal_attn'),
+      cross_entropy: mkPL('cross_entropy'),
+    };
+
+    const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+    const df = device.createBuffer({ size: 4, usage: SC });
+    const du = device.createBuffer({ size: 4, usage: SC });
+
+    // Activation buffers sized for worst-case (Stage 3: V=2000, ctx=128, D=64, F=256)
+    const mkA = n => device.createBuffer({ size: Math.max(4, n * 4), usage: SC });
+    const act = {
+      x0: mkA(128*64), x1: mkA(128*64), norm: mkA(128*64),
+      Q:  mkA(128*64), K:  mkA(128*64), Vb:  mkA(128*64),
+      attn: mkA(128*64), proj: mkA(128*64), ff_h: mkA(128*256),
+      logits: mkA(128*2000),
+      perTokenLoss: mkA(128),
+      lossStage: device.createBuffer({
+        size: 128 * 4,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      }),
+    };
+
+    device.lost.then(() => { gpuCtx = null; gpuModelBufs = null; });
+    post({ type: 'gpu_ready' });
+    return { device, bgl, pl, df, du, act };
+  } catch (e) {
+    console.warn('[GPU] init failed:', e.message);
+    return null;
+  }
+}
+
+function gpuUploadModel(device, model) {
+  const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+  const up = a => {
+    const b = device.createBuffer({ size: Math.max(4, a.byteLength), usage: SC, mappedAtCreation: true });
+    new Float32Array(b.getMappedRange()).set(a);
+    b.unmap();
+    return b;
+  };
+  return {
+    embed: up(model.embed), pos_embed: up(model.pos_embed),
+    blocks: model.blocks.map(b => ({
+      wq: up(b.wq), wk: up(b.wk), wv: up(b.wv), wo: up(b.wo),
+      ff1: up(b.ff1), ff2: up(b.ff2),
+      ln1_g: up(b.ln1_g), ln1_b: up(b.ln1_b),
+      ln2_g: up(b.ln2_g), ln2_b: up(b.ln2_b),
+    })),
+    ln_f_g: up(model.ln_f_g), ln_f_b: up(model.ln_f_b),
+  };
+}
+
+function gpuSyncModel(device, gpuM, model) {
+  const wr = (buf, data) => device.queue.writeBuffer(buf, 0, data);
+  wr(gpuM.embed, model.embed); wr(gpuM.pos_embed, model.pos_embed);
+  for (let l = 0; l < model.blocks.length; l++) {
+    const b = model.blocks[l], g = gpuM.blocks[l];
+    wr(g.wq, b.wq); wr(g.wk, b.wk); wr(g.wv, b.wv); wr(g.wo, b.wo);
+    wr(g.ff1, b.ff1); wr(g.ff2, b.ff2);
+    wr(g.ln1_g, b.ln1_g); wr(g.ln1_b, b.ln1_b);
+    wr(g.ln2_g, b.ln2_g); wr(g.ln2_b, b.ln2_b);
+  }
+  wr(gpuM.ln_f_g, model.ln_f_g); wr(gpuM.ln_f_b, model.ln_f_b);
+}
+
+// Records one compute dispatch into enc (creates a small per-dispatch uniform buffer)
+function gpuPass(enc, device, bgl, df, du, pl, cfgArr, a, b, c, out, u32, dx, dy = 1) {
+  const cfgBuf = device.createBuffer({
+    size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    mappedAtCreation: true,
+  });
+  new Uint32Array(cfgBuf.getMappedRange()).set(
+    [cfgArr[0] || 0, cfgArr[1] || 0, cfgArr[2] || 0, cfgArr[3] || 0]
+  );
+  cfgBuf.unmap();
+  const bg = device.createBindGroup({
+    layout: bgl,
+    entries: [
+      { binding: 0, resource: { buffer: cfgBuf } },
+      { binding: 1, resource: { buffer: a   || df } },
+      { binding: 2, resource: { buffer: b   || df } },
+      { binding: 3, resource: { buffer: c   || df } },
+      { binding: 4, resource: { buffer: out        } },
+      { binding: 5, resource: { buffer: u32 || du  } },
+    ]
+  });
+  const pass = enc.beginComputePass();
+  pass.setPipeline(pl);
+  pass.setBindGroup(0, bg);
+  pass.dispatchWorkgroups(dx, dy);
+  pass.end();
+}
+
+// Full forward pass + cross-entropy on GPU; reads back only T floats (512 bytes).
+async function forwardLossGPU(model, tokens, targets) {
+  const { device, bgl, pl: PL, act, df, du } = gpuCtx;
+  const gpuM = gpuModelBufs;
+  const T    = tokens.length;
+  const { vocab_size: V, d_model: D, n_heads: H, n_layers: L, d_ff: F } = model.cfg;
+
+  const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+  const mkU32 = arr => {
+    const b = device.createBuffer({ size: Math.max(4, arr.length * 4), usage: SC, mappedAtCreation: true });
+    new Uint32Array(b.getMappedRange()).set(arr);
+    b.unmap();
+    return b;
+  };
+  const tokBuf = mkU32(tokens);
+  const tgtBuf = mkU32(targets);
+
+  const enc = device.createCommandEncoder();
+  const c8  = n => Math.ceil(n / 8);
+  const c64 = n => Math.ceil(n / 64);
+  const go  = (pl, cfg, a, b, c, out, u32, dx, dy = 1) =>
+    gpuPass(enc, device, bgl, df, du, pl, cfg, a, b, c, out, u32, dx, dy);
+
+  let curX = act.x0, tmpX = act.x1;
+  go(PL.embed_add, [T, D], gpuM.embed, gpuM.pos_embed, null, curX, tokBuf, c64(T * D));
+  for (let l = 0; l < L; l++) {
+    const blk = gpuM.blocks[l];
+    go(PL.layer_norm,   [T, D],    curX,     blk.ln1_g, blk.ln1_b, act.norm, null, T);
+    go(PL.matmul,       [T, D, D], act.norm, blk.wq,    null,      act.Q,    null, c8(D), c8(T));
+    go(PL.matmul,       [T, D, D], act.norm, blk.wk,    null,      act.K,    null, c8(D), c8(T));
+    go(PL.matmul,       [T, D, D], act.norm, blk.wv,    null,      act.Vb,   null, c8(D), c8(T));
+    go(PL.causal_attn,  [T, D, H], act.Q,    act.K,     act.Vb,    act.attn, null, 1,     T);
+    go(PL.matmul,       [T, D, D], act.attn, blk.wo,    null,      act.proj, null, c8(D), c8(T));
+    go(PL.residual_add, [T * D],   curX,     act.proj,  null,      tmpX,     null, c64(T * D));
+    [curX, tmpX] = [tmpX, curX];
+    go(PL.layer_norm,   [T, D],    curX,     blk.ln2_g, blk.ln2_b, act.norm,  null, T);
+    go(PL.matmul,       [T, D, F], act.norm, blk.ff1,   null,      act.ff_h,  null, c8(F), c8(T));
+    go(PL.gelu_inplace, [T * F],   null,     null,      null,      act.ff_h,  null, c64(T * F));
+    go(PL.matmul,       [T, F, D], act.ff_h, blk.ff2,   null,      act.proj,  null, c8(D), c8(T));
+    go(PL.residual_add, [T * D],   curX,     act.proj,  null,      tmpX,      null, c64(T * D));
+    [curX, tmpX] = [tmpX, curX];
+  }
+  go(PL.layer_norm,    [T, D],    curX,      gpuM.ln_f_g, gpuM.ln_f_b, act.norm,         null,   T);
+  go(PL.matmul_bt,     [T, D, V], act.norm,  gpuM.embed,  null,        act.logits,        null,   c8(V), c8(T));
+  go(PL.cross_entropy, [T, V],    act.logits, null,        null,        act.perTokenLoss,  tgtBuf, T);
+
+  enc.copyBufferToBuffer(act.perTokenLoss, 0, act.lossStage, 0, T * 4);
+  device.queue.submit([enc.finish()]);
+  tokBuf.destroy();
+  tgtBuf.destroy();
+
+  await act.lossStage.mapAsync(GPUMapMode.READ, 0, T * 4);
+  const losses = new Float32Array(act.lossStage.getMappedRange(0, T * 4).slice(0));
+  act.lossStage.unmap();
+
+  let sum = 0;
+  for (const l of losses) sum += l;
+  return sum / T;
+}
+
+async function batchLossGPU(model, bx, by, B, SL) {
+  let total = 0;
+  for (let b = 0; b < B; b++) {
+    total += await forwardLossGPU(
+      model,
+      bx.subarray(b * SL, (b + 1) * SL),
+      by.subarray(b * SL, (b + 1) * SL),
+    );
+  }
+  return total / B;
+}
+
+// EGGROLL with GPU fitness evaluation; weight math stays on CPU
+async function eggrollStepGPU(model, bx, by, cfg, step, stage) {
+  const { pop_size: P, sigma, lr, batch_size: B, seq_len: SL, seed } = cfg;
+  const tensors = modelTensors(model);
+  const rawFit  = new Float32Array(P);
+
+  for (let p = 0; p < P / 2; p++) {
+    for (let sign = 1; sign >= -1; sign -= 2) {
+      const popIdx = p * 2 + (sign === 1 ? 0 : 1);
+      for (let tid = 0; tid < tensors.length; tid++) {
+        const W = tensors[tid];
+        for (let j = 0; j < W.length; j++) W[j] += sign * sigma * rngEps(seed, stage, step, p, tid, j);
+      }
+      gpuSyncModel(gpuCtx.device, gpuModelBufs, model);
+      rawFit[popIdx] = -(await batchLossGPU(model, bx, by, B, SL));
+      for (let tid = 0; tid < tensors.length; tid++) {
+        const W = tensors[tid];
+        for (let j = 0; j < W.length; j++) W[j] -= sign * sigma * rngEps(seed, stage, step, p, tid, j);
+      }
+    }
+  }
+
+  let mean = 0; for (const f of rawFit) mean += f; mean /= P;
+  let std  = 0; for (const f of rawFit) std  += (f - mean) ** 2; std = Math.sqrt(std / P);
+  const norm = rawFit.map(f => (f - mean) / (std + 1e-8));
+
+  for (let tid = 0; tid < tensors.length; tid++) {
+    const W = tensors[tid];
+    for (let j = 0; j < W.length; j++) {
+      let g = 0;
+      for (let i = 0; i < P; i++) {
+        const pp = Math.floor(i / 2), s = (i % 2 === 0) ? 1 : -1;
+        g += norm[i] * s * rngEps(seed, stage, step, pp, tid, j);
+      }
+      W[j] += lr * g / (P * sigma);
+    }
+  }
+  gpuSyncModel(gpuCtx.device, gpuModelBufs, model);
+  return rawFit;
+}
+
+// ============================================================
+// TRAINING LOOP
+// ============================================================
+
+async function runLoop(stageIdx) {
+  const s    = stages[stageIdx];
+  const { cfg, model, trainTokens, valTokens } = s;
+  const { steps, batch_size: B, seq_len: SL } = cfg;
+  const T0 = Date.now();
+
+  while (!pauseFlag && s.step < steps) {
+    s.step++;
+    const wallStart = Date.now();
+
+    // Sample training batch
+    const trainRng    = makeLcg(cfg.seed, stageIdx, s.step);
+    const { bx, by } = sampleBatch(trainTokens, B, SL, trainRng);
+
+    // EGGROLL update (GPU when available, CPU fallback)
+    const rawFit = gpuCtx
+      ? await eggrollStepGPU(model, bx, by, cfg, s.step, stageIdx)
+      : eggrollStep(model, bx, by, cfg, s.step, stageIdx);
+    const trainLoss = -rawFit.reduce((a, b) => a + b, 0) / rawFit.length;
+
+    // Report every 10 steps
+    if (s.step % 10 === 0) {
+      const valSL  = Math.min(SL, valTokens.length - 1);
+      let valLoss  = NaN;
+      if (valSL > 1) {
+        const valRng    = makeLcg(cfg.seed + 1, stageIdx, s.step);
+        const { bx: vx, by: vy } = sampleBatch(valTokens, Math.min(2, Math.floor(valTokens.length / valSL)), valSL, valRng);
+        valLoss = batchLoss(model, vx, vy, Math.min(2, Math.floor(valTokens.length / valSL)), valSL);
+      }
+
+      const entry = { step: s.step, train_loss: trainLoss, val_loss: valLoss, wall_ms: Date.now() - T0 };
+      s.history.push(entry);
+
+      post({ type: 'progress', stage: stageIdx, step: s.step,
+             train_loss: trainLoss, val_loss: valLoss, wall_ms: Date.now() - T0 });
+
+      // Sample
+      const genRng = makeLcg(cfg.seed + 99, stageIdx, s.step);
+      const seed_text = s.bpe
+        ? bpeDecode(Array.from(trainTokens.slice(0, 10)), s.bpe.vocab)
+        : String.fromCharCode(...Array.from(trainTokens.slice(0, 10)));
+      const text = generateSample(model, seed_text, 100, genRng, 0.8, s.bpe);
+      const sEntry = { step: s.step, text };
+      s.sampleHistory.push(sEntry);
+      if (s.sampleHistory.length > 20) s.sampleHistory.shift();
+      post({ type: 'sample', stage: stageIdx, step: s.step, text });
+    }
+
+    // Checkpoint every 50 steps
+    if (s.step % 50 === 0) {
+      await saveCheckpointOPFS(stageIdx, s);
+      post({ type: 'checkpoint_saved', stage: stageIdx, step: s.step });
+    }
+
+    // Guided-mode unlock notifications
+    if (stageIdx === 1 && s.step === 300) post({ type: 'unlock', unlocks: 2 });
+    if (stageIdx === 2 && s.step === 1000) post({ type: 'unlock', unlocks: 3 });
+
+    // Yield to prevent blocking the worker event loop
+    await new Promise(r => setTimeout(r, 0));
+  }
+
+  if (pauseFlag) {
+    pauseFlag = false;
+    activeStage = null;
+    post({ type: 'paused', stage: stageIdx, step: s.step });
+    return;
+  }
+
+  // Done
+  s.running = false;
+  activeStage = null;
+  const modelJson = serializeModel(model);
+  await saveCheckpointOPFS(stageIdx, s);
+  post({ type: 'done', stage: stageIdx, step: s.step, model_json: modelJson });
+
+  // Compare-mode unlock if >=2 stages done
+  const doneCt = [1, 2, 3].filter(i => stages[i] && !stages[i].running && stages[i].step >= (stages[i].cfg.steps || STAGE_STEPS[i])).length;
+  if (doneCt >= 2) post({ type: 'unlock', unlocks: 'compare' });
+}
+
+// ============================================================
+// MESSAGE HANDLERS
+// ============================================================
+
+async function handleInit(msg) {
+  const { stage, config, corpus, seed } = msg;
+
+  const cfg       = { ...DEFAULT_CFG, steps: STAGE_STEPS[stage], ...config, seed: seed || DEFAULT_CFG.seed };
+  const corpusHash = await hashCorpus(corpus);
+
+  // Check for existing checkpoint
+  const ckpt = await loadCheckpointOPFS(stage);
+  if (ckpt && ckpt.corpus_hash === corpusHash && ckpt.step > 0) {
+    post({ type: 'checkpoint_found', stage, step: ckpt.step, corpus_hash: corpusHash });
+    // Store pending resume data
+    stages[`pending_${stage}`] = { ckpt, corpus, cfg };
+    return;
+  }
+
+  // Initialise WebGPU once per worker lifetime
+  if (gpuCtx === undefined) gpuCtx = await initWebGPU();
+
+  // Fresh init
+  await initStage(stage, corpus, cfg, corpusHash);
+  post({ type: 'ready', stage });
+}
+
+async function initStage(stage, corpus, cfg, corpusHash) {
+  const splitIdx    = Math.floor(corpus.length * (1 - cfg.val_split));
+  const trainCorpus = corpus.slice(0, splitIdx);
+  const valCorpus   = corpus.slice(splitIdx);
+
+  let bpe = null, trainTokens, valTokens;
+  if (stage === 3) {
+    post({ type: 'status', stage, message: 'Training BPE tokenizer...' });
+    bpe         = trainBPE(corpus, makeModelCfg(3).vocab_size);
+    trainTokens = bpeEncode(trainCorpus, bpe.merges);
+    valTokens   = bpeEncode(valCorpus,   bpe.merges);
+  } else {
+    trainTokens = tokenizeBytes(trainCorpus);
+    valTokens   = tokenizeBytes(valCorpus);
+  }
+
+  const modelCfg = makeModelCfg(stage);
+  const model    = initModel(modelCfg, cfg.seed);
+
+  stages[stage] = {
+    model, trainTokens, valTokens, bpe,
+    cfg: { ...cfg, steps: cfg.steps || STAGE_STEPS[stage] },
+    step: 0, running: false,
+    history: [], sampleHistory: [],
+    corpusHash
+  };
+
+  if (gpuCtx) gpuModelBufs = gpuUploadModel(gpuCtx.device, model);
+}
+
+async function handleResume(msg) {
+  const { stage } = msg;
+  const pending = stages[`pending_${stage}`];
+  if (!pending) { post({ type: 'error', stage, message: 'No pending resume.' }); return; }
+
+  const { ckpt, corpus, cfg } = pending;
+  delete stages[`pending_${stage}`];
+
+  const corpusHash = await hashCorpus(corpus);
+  const model      = deserializeModel(ckpt.model);
+  const splitIdx   = Math.floor(corpus.length * (1 - cfg.val_split));
+
+  const bpe = ckpt.bpe || null;
+  let trainTokens, valTokens;
+  if (stage === 3 && bpe) {
+    trainTokens = bpeEncode(corpus.slice(0, splitIdx), bpe.merges);
+    valTokens   = bpeEncode(corpus.slice(splitIdx),   bpe.merges);
+  } else {
+    trainTokens = tokenizeBytes(corpus.slice(0, splitIdx));
+    valTokens   = tokenizeBytes(corpus.slice(splitIdx));
+  }
+
+  stages[stage] = {
+    model, trainTokens, valTokens, bpe,
+    cfg: { ...DEFAULT_CFG, ...ckpt.config, steps: cfg.steps || STAGE_STEPS[stage] },
+    step: ckpt.step, running: false,
+    history: ckpt.history || [], sampleHistory: ckpt.sample_history || [],
+    corpusHash
+  };
+
+  if (gpuCtx) gpuModelBufs = gpuUploadModel(gpuCtx.device, model);
+  post({ type: 'ready', stage, step: ckpt.step });
+}
+
+async function handleStart(msg) {
+  const { stage } = msg;
+  const s = stages[stage];
+  if (!s) { post({ type: 'error', stage, message: 'Stage not initialised. Send init first.' }); return; }
+  if (activeStage !== null && activeStage !== stage) {
+    post({ type: 'error', stage, message: `Stage ${activeStage} is already running.` }); return;
+  }
+
+  pauseFlag   = false;
+  s.running   = true;
+  activeStage = stage;
+  runLoop(stage); // fire-and-forget
+}
+
+function handlePause(msg) {
+  pauseFlag = true;
+}
+
+async function handleReset(msg) {
+  const { stage } = msg;
+  if (activeStage === stage) { pauseFlag = true; }
+  delete stages[stage];
+  await deleteCheckpointOPFS(stage);
+  post({ type: 'reset_done', stage });
+}
+
+async function handleGenerate(msg) {
+  const { stage, seed_text, max_tokens } = msg;
+  const s = stages[stage];
+  if (!s) { post({ type: 'generated', stage, text: '(model not trained)' }); return; }
+  const rng  = makeLcg(s.cfg.seed + 77, stage, s.step + 1000);
+  const text = generateSample(s.model, seed_text || '\n', max_tokens || 200, rng, 0.8, s.bpe || null);
+  post({ type: 'generated', stage, text });
+}
+
+// ============================================================
+// WORKER MESSAGE ENTRY POINT
+// ============================================================
+
+function post(msg) {
+  if (typeof self !== 'undefined') self.postMessage(msg);
+}
+
+if (typeof self !== 'undefined') {
+  self.addEventListener('message', async (e) => {
+    try {
+      const m = e.data;
+      if      (m.type === 'init')     await handleInit(m);
+      else if (m.type === 'resume')   await handleResume(m);
+      else if (m.type === 'start')    await handleStart(m);
+      else if (m.type === 'pause')    handlePause(m);
+      else if (m.type === 'reset')    await handleReset(m);
+      else if (m.type === 'generate') await handleGenerate(m);
+      else if (m.type === 'train_bpe') {
+        const bpe = trainBPE(m.corpus, m.targetVocab || 2000);
+        post({ type: 'bpe_ready', vocab_size: bpe.vocab.length });
+      }
+    } catch (err) {
+      self.postMessage({ type: 'error', stage: e.data?.stage, message: err.message });
+    }
+  });
+}
+</script>
+
+<!-- ── Main thread logic ─────────────────────────────────────────────── -->
+<script>
+'use strict';
+
+// ============================================================
+// TAPASYA — main thread
+// Owns: UI state, worker lifecycle, chart rendering, DOM updates
+// Never touches model weights directly.
+// ============================================================
+
+// ---- State ----
+const S = {
+  mode: null,          // 'guided' | 'free'
+  corpus: '',
+  corpusLocked: false,
+  worker: null,
+  stages: {
+    1: { status: 'idle', step: 0, steps: 500, history: [], samples: [], unlocked: true,  cfg: {} },
+    2: { status: 'idle', step: 0, steps: 2000, history: [], samples: [], unlocked: false, cfg: {} },
+    3: { status: 'idle', step: 0, steps: 2000, history: [], samples: [], unlocked: false, cfg: {} }
+  },
+  activeStage: 1,
+  compareMode: false,
+  compareUnlocked: false,
+  workerReady: false,
+};
+
+// ---- Worker ----
+function spawnWorker() {
+  if (S.worker) S.worker.terminate();
+  const src = document.getElementById('worker-src').textContent;
+  S.worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'application/javascript' })));
+  S.worker.addEventListener('message', onWorkerMessage);
+  S.worker.addEventListener('error', e => {
+    console.error('Worker error:', e.message);
+    showBanner('Worker error: ' + e.message, 'error');
+  });
+}
+
+function workerPost(msg) {
+  if (!S.worker) spawnWorker();
+  S.worker.postMessage(msg);
+}
+
+// ---- Worker → Main ----
+function onWorkerMessage(e) {
+  const m = e.data;
+  switch (m.type) {
+    case 'ready':
+      S.stages[m.stage].status = 'ready';
+      updateStageUI(m.stage);
+      onStageReady(m.stage);
+      break;
+
+    case 'checkpoint_found':
+      offerResume(m.stage, m.step);
+      break;
+
+    case 'progress':
+      onProgress(m);
+      break;
+
+    case 'sample':
+      onSample(m);
+      break;
+
+    case 'checkpoint_saved':
+      flashStatus(m.stage, `checkpoint saved @ step ${m.step}`);
+      break;
+
+    case 'paused':
+      S.stages[m.stage].status = 'paused';
+      S.stages[m.stage].step   = m.step;
+      updateStageUI(m.stage);
+      break;
+
+    case 'done':
+      onStageDone(m);
+      break;
+
+    case 'generated':
+      onGenerated(m);
+      break;
+
+    case 'unlock':
+      if (m.unlocks === 'compare') {
+        S.compareUnlocked = true;
+        updateCompareButton();
+      } else {
+        S.stages[m.unlocks].unlocked = true;
+        updateStageUI(m.unlocks);
+        if (S.mode === 'guided') showUnlockBanner(m.unlocks);
+      }
+      break;
+
+    case 'reset_done':
+      onResetDone(m.stage);
+      break;
+
+    case 'status':
+      flashStatus(m.stage, m.message);
+      break;
+
+    case 'gpu_ready':
+      console.log('[tapasya] WebGPU backend active');
+      showBanner('WebGPU active — training will be accelerated.', 'ok');
+      break;
+
+    case 'error':
+      console.error('[tapasya worker]', m.message);
+      showBanner('Error: ' + m.message, 'error');
+      if (m.stage) { S.stages[m.stage].status = 'error'; updateStageUI(m.stage); }
+      break;
+  }
+}
+
+// ---- Corpus ----
+function lockCorpus() {
+  S.corpusLocked = true;
+  $('corpus-input').setAttribute('disabled', '');
+  $('corpus-lock-msg').textContent = 'Corpus locked — reset all stages to change it.';
+}
+
+// ---- Init stage ----
+function sendInit(stage) {
+  const st  = S.stages[stage];
+  const cfg = { ...st.cfg, steps: st.steps };
+  workerPost({ type: 'init', stage, config: cfg, corpus: S.corpus, seed: 42 });
+}
+
+// ---- Controls ----
+function startStage(stage) {
+  if (!S.corpus.trim()) { showBanner('Paste a corpus first.', 'warn'); return; }
+  if (!S.corpusLocked) lockCorpus();
+
+  const st = S.stages[stage];
+  if (st.status === 'idle' || st.status === 'error') sendInit(stage);
+
+  // Worker will post 'ready', then we call start
+  st._pendingStart = true;
+  st.status = 'init';
+  updateStageUI(stage);
+}
+
+// Called when worker posts 'ready'
+function onStageReady(stage) {
+  const st = S.stages[stage];
+  if (st._pendingStart) {
+    delete st._pendingStart;
+    workerPost({ type: 'start', stage });
+    st.status = 'running';
+    updateStageUI(stage);
+  }
+}
+
+function pauseStage(stage) {
+  workerPost({ type: 'pause', stage });
+  S.stages[stage].status = 'pausing';
+  updateStageUI(stage);
+}
+
+function resumeStage(stage) {
+  workerPost({ type: 'start', stage });
+  S.stages[stage].status = 'running';
+  updateStageUI(stage);
+}
+
+function resetStage(stage) {
+  workerPost({ type: 'reset', stage });
+  S.stages[stage].status = 'resetting';
+  updateStageUI(stage);
+}
+
+function downloadStage(stage) {
+  const st = S.stages[stage];
+  if (!st.modelJson) { showBanner('Stage not complete yet.', 'warn'); return; }
+  const blob = new Blob([JSON.stringify(st.modelJson)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `tapasya-stage-${stage}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ---- Progress ----
+function onProgress(m) {
+  const st = S.stages[m.stage];
+  st.step  = m.step;
+  st.status = 'running';
+  st.history.push({ step: m.step, train: m.train_loss, val: m.val_loss });
+  if (st.history.length > 500) st.history.shift();
+  drawChart(m.stage);
+  updateStatus(m.stage, m.step, m.train_loss, m.val_loss, m.wall_ms);
+}
+
+function onSample(m) {
+  const st = S.stages[m.stage];
+  st.samples.unshift({ step: m.step, text: m.text });
+  if (st.samples.length > 20) st.samples.pop();
+  renderSamples(m.stage);
+}
+
+function onStageDone(m) {
+  const st = S.stages[m.stage];
+  st.status   = 'done';
+  st.step     = m.step;
+  st.modelJson = m.model_json;
+  updateStageUI(m.stage);
+  showBanner(`Stage ${m.stage} complete.`, 'ok');
+}
+
+function onGenerated(m) {
+  const col = $(`compare-col-${m.stage}`);
+  if (col) col.querySelector('.compare-output').textContent = m.text;
+}
+
+function onResetDone(stage) {
+  const st = S.stages[stage];
+  st.status = 'idle';
+  st.step   = 0;
+  st.history = [];
+  st.samples = [];
+  st.modelJson = null;
+  delete st._pendingStart;
+  updateStageUI(stage);
+  drawChart(stage);
+  renderSamples(stage);
+
+  if (st._pendingFreshStart) {
+    delete st._pendingFreshStart;
+    sendInit(stage);
+    st._pendingStart = true;
+    st.status = 'init';
+    updateStageUI(stage);
+    return;
+  }
+
+  // Unlock corpus if all stages are idle
+  const allIdle = [1, 2, 3].every(i => ['idle', 'error'].includes(S.stages[i].status));
+  if (allIdle) {
+    S.corpusLocked = false;
+    $('corpus-input').removeAttribute('disabled');
+    $('corpus-lock-msg').textContent = '';
+  }
+}
+
+// ---- Resume offer ----
+function offerResume(stage, step) {
+  const st = S.stages[stage];
+  const msg = `Stage ${stage} checkpoint found at step ${step}. Resume?`;
+  // Simple banner with resume / start-fresh buttons
+  const bar = document.createElement('div');
+  bar.className = 'resume-bar';
+  bar.innerHTML = `<span>${msg}</span>
+    <button onclick="doResume(${stage},this)">Resume</button>
+    <button onclick="doFresh(${stage},this)">Start fresh</button>`;
+  $(`stage-${stage}-header`).after(bar);
+}
+
+window.doResume = function(stage, btn) {
+  btn.closest('.resume-bar').remove();
+  workerPost({ type: 'resume', stage });
+  S.stages[stage]._pendingStart = true;
+  S.stages[stage].status = 'init';
+  updateStageUI(stage);
+};
+
+window.doFresh = function(stage, btn) {
+  btn.closest('.resume-bar').remove();
+  // Reset deletes the OPFS checkpoint; onResetDone will then call sendInit
+  workerPost({ type: 'reset', stage });
+  S.stages[stage]._pendingFreshStart = true;
+  S.stages[stage].status = 'resetting';
+  updateStageUI(stage);
+};
+
+// ---- Unlocks ----
+function showUnlockBanner(stage) {
+  showBanner(`Stage ${stage} unlocked!`, 'ok');
+  const tab = $(`tab-${stage}`);
+  if (tab) tab.classList.add('unlocked-flash');
+  setTimeout(() => tab && tab.classList.remove('unlocked-flash'), 2000);
+}
+
+// ---- Compare mode ----
+function toggleCompare() {
+  if (!S.compareUnlocked) return;
+  S.compareMode = !S.compareMode;
+  $('compare-panel').style.display = S.compareMode ? 'flex' : 'none';
+  $('stages-panel').style.display  = S.compareMode ? 'none' : 'block';
+  if (S.compareMode) runCompare();
+}
+
+function runCompare() {
+  const seedText = $('compare-seed').value || '';
+  [1, 2, 3].forEach(stage => {
+    const col = $(`compare-col-${stage}`);
+    if (!col) return;
+    col.querySelector('.compare-output').textContent = '...generating...';
+    if (S.stages[stage].modelJson || S.stages[stage].status === 'done' || S.stages[stage].step > 0) {
+      workerPost({ type: 'generate', stage, seed_text: seedText, max_tokens: 200 });
+    } else {
+      col.querySelector('.compare-output').textContent = '(not trained)';
+    }
+  });
+}
+
+function updateCompareButton() {
+  const btn = $('compare-btn');
+  if (!btn) return;
+  btn.disabled = !S.compareUnlocked;
+  btn.title    = S.compareUnlocked ? '' : 'Complete at least two stages to compare';
+}
+
+// ---- Stage tab switching ----
+function switchStage(stage) {
+  if (S.mode === 'guided' && !S.stages[stage].unlocked) return;
+  S.activeStage = stage;
+  [1, 2, 3].forEach(i => {
+    $(`tab-${i}`)?.classList.toggle('active', i === stage);
+    $(`stage-panel-${i}`)?.style.setProperty('display', i === stage ? 'block' : 'none');
+  });
+}
+
+// ---- Chart (Canvas 2D) ----
+const chartCtx = {};
+function initChart(stage) {
+  const canvas = $(`chart-${stage}`);
+  if (!canvas) return;
+  chartCtx[stage] = canvas.getContext('2d');
+  drawChart(stage);
+}
+
+function drawChart(stage) {
+  const ctx = chartCtx[stage];
+  if (!ctx) return;
+  const hist = S.stages[stage].history;
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  if (hist.length < 2) {
+    ctx.fillStyle = '#555';
+    ctx.font = '13px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Loss chart — starts when training begins', W / 2, H / 2);
+    return;
+  }
+
+  const vals = hist.flatMap(p => [p.train, isFinite(p.val) ? p.val : p.train]).filter(isFinite);
+  const maxV = Math.max(...vals) * 1.05;
+  const minV = Math.max(0, Math.min(...vals) * 0.95);
+  const pad  = { l: 44, r: 12, t: 10, b: 28 };
+  const cW   = W - pad.l - pad.r, cH = H - pad.t - pad.b;
+
+  const xOf = i => pad.l + (i / (hist.length - 1)) * cW;
+  const yOf = v => pad.t + (1 - (v - minV) / (maxV - minV + 1e-10)) * cH;
+
+  // Grid
+  ctx.strokeStyle = '#2a2a2a'; ctx.lineWidth = 1;
+  for (let g = 0; g <= 4; g++) {
+    const y = pad.t + g * cH / 4;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + cW, y); ctx.stroke();
+    const v = maxV - g * (maxV - minV) / 4;
+    ctx.fillStyle = '#555'; ctx.font = '10px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(v.toFixed(2), pad.l - 4, y + 4);
+  }
+
+  // Curves
+  function drawLine(key, color) {
+    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+    let started = false;
+    for (let i = 0; i < hist.length; i++) {
+      const v = hist[i][key];
+      if (!isFinite(v)) continue;
+      if (!started) { ctx.moveTo(xOf(i), yOf(v)); started = true; }
+      else            ctx.lineTo(xOf(i), yOf(v));
+    }
+    ctx.stroke();
+  }
+  drawLine('train', '#4e9af1');
+  drawLine('val',   '#f1a84e');
+
+  // X axis labels
+  ctx.fillStyle = '#555'; ctx.font = '10px monospace'; ctx.textAlign = 'center';
+  const ticks = [0, Math.floor(hist.length / 2), hist.length - 1];
+  ticks.forEach(i => {
+    if (i < hist.length) ctx.fillText(hist[i].step, xOf(i), H - pad.b + 14);
+  });
+
+  // Legend
+  ctx.font = '11px monospace'; ctx.textAlign = 'left';
+  ctx.fillStyle = '#4e9af1'; ctx.fillText('— train', pad.l, pad.t + 14);
+  ctx.fillStyle = '#f1a84e'; ctx.fillText('— val',   pad.l + 60, pad.t + 14);
+}
+
+// ---- Status line ----
+function updateStatus(stage, step, trainLoss, valLoss, wallMs) {
+  const el = $(`status-${stage}`);
+  if (!el) return;
+  const steps = S.stages[stage].steps;
+  const eta   = wallMs > 0 ? Math.round((steps - step) * (wallMs / step) / 1000) : 0;
+  el.textContent = `Step ${step}/${steps} · train ${trainLoss.toFixed(4)} · val ${isFinite(valLoss) ? valLoss.toFixed(4) : 'n/a'} · ETA ~${eta}s`;
+}
+
+function flashStatus(stage, msg) {
+  const el = $(`status-${stage}`);
+  if (!el) return;
+  const old = el.textContent;
+  el.textContent = msg;
+  setTimeout(() => { if (el.textContent === msg) el.textContent = old; }, 1500);
+}
+
+// ---- Samples pane ----
+function renderSamples(stage) {
+  const el = $(`samples-${stage}`);
+  if (!el) return;
+  const st = S.stages[stage];
+  el.innerHTML = st.samples.map(s =>
+    `<div class="sample-entry"><span class="sample-step">step ${s.step}</span><pre class="sample-text">${escHtml(s.text)}</pre></div>`
+  ).join('');
+}
+
+// ---- Stage UI update (buttons, labels) ----
+function updateStageUI(stage) {
+  const st  = S.stages[stage];
+  const tab = $(`tab-${stage}`);
+
+  // Tab lock state (guided mode)
+  if (tab) {
+    tab.classList.toggle('locked', S.mode === 'guided' && !st.unlocked);
+    tab.classList.toggle('active', stage === S.activeStage);
+  }
+
+  const panel = $(`stage-panel-${stage}`);
+  if (!panel) return;
+
+  // Status badge
+  const badge = panel.querySelector('.stage-status-badge');
+  if (badge) {
+    const labels = { idle: 'idle', init: 'initialising…', ready: 'ready',
+                     running: 'training', pausing: 'pausing…', paused: 'paused',
+                     done: 'complete', resetting: 'resetting…', error: 'error' };
+    badge.textContent = labels[st.status] || st.status;
+    badge.className   = `stage-status-badge badge-${st.status}`;
+  }
+
+  // Buttons
+  const startBtn   = panel.querySelector('.btn-start');
+  const pauseBtn   = panel.querySelector('.btn-pause');
+  const resetBtn   = panel.querySelector('.btn-reset');
+  const dlBtn      = panel.querySelector('.btn-download');
+
+  if (startBtn)  startBtn.disabled  = ['running', 'init', 'pausing', 'resetting'].includes(st.status);
+  if (pauseBtn)  pauseBtn.disabled  = !['running'].includes(st.status);
+  if (resetBtn)  resetBtn.disabled  = ['resetting', 'init'].includes(st.status);
+  if (dlBtn)     dlBtn.disabled     = st.status !== 'done';
+
+  // Settings (lock in guided mode)
+  const settings = panel.querySelector('.settings-panel');
+  if (settings) {
+    const locked = S.mode === 'guided' || ['running', 'init', 'pausing'].includes(st.status);
+    settings.querySelectorAll('input').forEach(i => { i.disabled = locked; });
+  }
+
+  // Guided-mode unlock overlay
+  const overlay = panel.querySelector('.locked-overlay');
+  if (overlay) overlay.style.display = (S.mode === 'guided' && !st.unlocked) ? 'flex' : 'none';
+
+  // Ready → start if pending
+  if (st.status === 'ready') onStageReady(stage);
+}
+
+// ---- Mode selection ----
+function selectMode(mode) {
+  S.mode = mode;
+  $('landing').style.display    = 'none';
+  $('app-shell').style.display  = 'block';
+
+  if (mode === 'guided') {
+    $('stages-label').textContent = 'Guided tour';
+    S.stages[2].unlocked = false;
+    S.stages[3].unlocked = false;
+  } else {
+    $('stages-label').textContent = 'Free mode';
+    S.stages[1].unlocked = true;
+    S.stages[2].unlocked = true;
+    S.stages[3].unlocked = true;
+  }
+
+  [1, 2, 3].forEach(i => { initChart(i); updateStageUI(i); });
+  switchStage(1);
+  spawnWorker();
+  saveModeToOPFS(mode);
+}
+
+// ---- OPFS mode persistence ----
+async function saveModeToOPFS(mode) {
+  try {
+    const root = await navigator.storage.getDirectory();
+    const dir  = await root.getDirectoryHandle('tapasya', { create: true });
+    const fh   = await dir.getFileHandle('prefs.json', { create: true });
+    const w    = await fh.createWritable();
+    await w.write(JSON.stringify({ mode }));
+    await w.close();
+  } catch {}
+}
+
+async function loadModeFromOPFS() {
+  try {
+    const root = await navigator.storage.getDirectory();
+    const dir  = await root.getDirectoryHandle('tapasya', { create: false });
+    const fh   = await dir.getFileHandle('prefs.json');
+    const f    = await fh.getFile();
+    return (JSON.parse(await f.text())).mode || null;
+  } catch { return null; }
+}
+
+// ---- Helpers ----
+function $(id) { return document.getElementById(id); }
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function showBanner(msg, type = 'info') {
+  const b = $('toast');
+  if (!b) return;
+  b.textContent = msg;
+  b.className   = `toast toast-${type} show`;
+  clearTimeout(b._t);
+  b._t = setTimeout(() => b.classList.remove('show'), 3000);
+}
+
+// ---- Settings reading (free mode) ----
+function readSettings(stage) {
+  const panel = $(`stage-panel-${stage}`);
+  if (!panel) return {};
+  const get = name => {
+    const el = panel.querySelector(`[data-cfg="${name}"]`);
+    return el ? parseFloat(el.value) || undefined : undefined;
+  };
+  return {
+    steps:      get('steps')      || S.stages[stage].steps,
+    pop_size:   get('pop_size'),
+    sigma:      get('sigma'),
+    lr:         get('lr'),
+    batch_size: get('batch_size'),
+    seed:       get('seed'),
+  };
+}
+
+// ---- Boot ----
+async function boot() {
+  const savedMode = await loadModeFromOPFS();
+  if (savedMode) {
+    selectMode(savedMode);
+  }
+  // Landing stays visible until user picks a mode
+  $('btn-guided').addEventListener('click', () => selectMode('guided'));
+  $('btn-free').addEventListener('click',   () => selectMode('free'));
+
+  $('corpus-input').addEventListener('input', e => {
+    S.corpus = e.target.value;
+    $('corpus-char-count').textContent = S.corpus.length.toLocaleString() + ' chars';
+  });
+
+  $('compare-btn').addEventListener('click', toggleCompare);
+  $('compare-regen').addEventListener('click', runCompare);
+  $('compare-back').addEventListener('click', toggleCompare);
+
+  updateCompareButton();
+}
+
+document.addEventListener('DOMContentLoaded', boot);
+</script>
 <script>
 // ---- Glue between HTML onclick and main.js ----
 
