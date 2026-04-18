@@ -2,7 +2,7 @@
 
 Train a language model in your browser — three stages, no server, no account, no data leaving your device.
 
-**[→ Try it live](https://tapasya.naklitechie.com)**
+**[→ Try it live](https://naklitechie.github.io/Tapasya/)**
 
 ## What it does
 
@@ -18,7 +18,9 @@ After any two stages complete, **Compare mode** lets you generate text from all 
 
 ## The algorithm
 
-**EGGROLL** — [Evolution Strategies at the Hyperscale](https://arxiv.org/abs/2511.16652) (arXiv:2511.16652, 2025). Forward-only training: a population of perturbed model copies are evaluated, fitness is z-score normalised, and a gradient estimate is computed by resampling the same perturbations. No autograd. No backprop. Tapasya implements a simplified isotropic-perturbation variant in plain JS + WGSL; the paper's low-rank trick is not used.
+**EGGROLL** — [Evolution Strategies at the Hyperscale](https://arxiv.org/abs/2511.16652) (arXiv:2511.16652, 2025). Forward-only training: a population of perturbed model copies are evaluated, fitness is z-score normalised, and a gradient estimate is computed by resampling the same perturbations. No autograd. No backprop.
+
+Tapasya uses standard isotropic perturbations (scalar σ applied to i.i.d. Gaussian noise). The paper's key innovation is replacing these with low-rank matrix products, which compresses the per-parameter cost from O(mn) to O(r(m+n)) and makes ES viable for billion-parameter models running at 91% of H100 inference throughput. At 130K parameters, isotropic perturbations are trivially fast and the extra complexity isn't warranted.
 
 ## How to run
 
@@ -36,7 +38,7 @@ For WebGPU acceleration, use Chrome or Edge on a machine with a GPU. Falls back 
 
 ## Tech
 
-- **EGGROLL** — isotropic-perturbation ES, inspired by [arXiv:2511.16652](https://arxiv.org/abs/2511.16652)
+- **ES (EGGROLL-style)** — isotropic-perturbation evolution strategies, ~400 lines of JS; see [arXiv:2511.16652](https://arxiv.org/abs/2511.16652)
 - **WebGPU** — GPU-accelerated forward pass + cross-entropy via custom WGSL kernels
 - **BPE tokenizer** — hand-rolled `trainBPE` / `bpeEncode` / `bpeDecode`, ~60 lines
 - **OPFS** — checkpoint save/restore so training survives a page reload
