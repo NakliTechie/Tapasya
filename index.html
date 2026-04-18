@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="author" content="Chirag Patnaik">
+<meta name="description" content="Train a language model in your browser — three stages, no server, no account.">
+<meta name="version" content="0.1.0">
+<title>Tapasya — browser-native model training</title>
+<style>
+/* ---- Reset + tokens ---- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #0d0d0d;
+  --bg1:      #141414;
+  --bg2:      #1c1c1c;
+  --bg3:      #242424;
+  --border:   #2e2e2e;
+  --border2:  #3a3a3a;
+  --text:     #e8e8e8;
+  --text2:    #999;
+  --text3:    #666;
+  --accent:   #4e9af1;
+  --accent2:  #f1a84e;
+  --ok:       #4ec94e;
+  --warn:     #f1c94e;
+  --err:      #f14e4e;
+  --font:     -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --mono:     'Cascadia Mono', 'Fira Code', 'Menlo', monospace;
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  height: 100%;
+}
+
+/* ---- Layout ---- */
+#landing  { display: flex; flex-direction: column; align-items: center; justify-content: center;
+            min-height: 100vh; padding: 40px 20px; gap: 40px; }
+#app-shell { display: none; flex-direction: column; height: 100vh; overflow: hidden; }
+
+/* ---- Landing ---- */
+.landing-title { font-size: 2rem; font-weight: 600; letter-spacing: -0.03em; }
+.landing-title span { color: var(--accent); }
+.landing-sub   { color: var(--text2); font-size: 0.9rem; max-width: 560px; text-align: center; }
+.landing-cards { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; }
+.landing-card  {
+  background: var(--bg2); border: 1px solid var(--border2);
+  border-radius: 10px; padding: 28px 36px; cursor: pointer;
+  min-width: 200px; text-align: center; transition: border-color 0.15s, background 0.15s;
+}
+.landing-card:hover  { border-color: var(--accent); background: var(--bg3); }
+.landing-card h2     { font-size: 1.1rem; margin-bottom: 6px; }
+.landing-card p      { color: var(--text2); font-size: 0.82rem; }
+.landing-explainer   { max-width: 600px; color: var(--text2); font-size: 0.85rem; line-height: 1.7;
+                       border-top: 1px solid var(--border); padding-top: 24px; text-align: center; }
+.landing-explainer p + p { margin-top: 10px; }
+
+/* ---- Top bar ---- */
+#top-bar { display: flex; align-items: center; gap: 16px; padding: 10px 20px;
+           border-bottom: 1px solid var(--border); background: var(--bg1); flex-shrink: 0; }
+.top-brand { font-weight: 600; font-size: 1rem; color: var(--text); }
+.top-brand span { color: var(--accent); }
+#stages-label { color: var(--text3); font-size: 0.8rem; }
+.top-spacer { flex: 1; }
+#compare-btn {
+  background: var(--bg3); border: 1px solid var(--border2); color: var(--text);
+  padding: 5px 14px; border-radius: 6px; cursor: pointer; font-size: 0.82rem;
+  transition: border-color 0.15s;
+}
+#compare-btn:hover:not(:disabled) { border-color: var(--accent); }
+#compare-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* ---- Corpus panel ---- */
+#corpus-panel { padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--bg1); flex-shrink: 0; }
+.corpus-header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.corpus-header label { font-size: 0.82rem; font-weight: 600; text-transform: uppercase;
+                        letter-spacing: 0.06em; color: var(--text2); }
+#corpus-char-count { color: var(--text3); font-size: 0.78rem; }
+#corpus-lock-msg   { color: var(--warn); font-size: 0.78rem; margin-left: auto; }
+#corpus-input {
+  width: 100%; background: var(--bg2); border: 1px solid var(--border); color: var(--text);
+  font-family: var(--mono); font-size: 0.78rem; padding: 8px 10px; border-radius: 6px;
+  resize: none; height: 72px; outline: none; transition: border-color 0.15s;
+}
+#corpus-input:focus { border-color: var(--accent); }
+#corpus-input:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---- Stage tabs ---- */
+#tab-bar { display: flex; gap: 2px; padding: 8px 20px 0; background: var(--bg1);
+           border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.stage-tab {
+  background: none; border: none; color: var(--text2);
+  padding: 7px 18px; cursor: pointer; font-size: 0.82rem; border-radius: 6px 6px 0 0;
+  border: 1px solid transparent; border-bottom: none; position: relative;
+  transition: color 0.15s, background 0.15s;
+}
+.stage-tab:hover:not(.locked) { color: var(--text); background: var(--bg2); }
+.stage-tab.active { color: var(--text); background: var(--bg); border-color: var(--border);
+                    border-bottom-color: var(--bg); margin-bottom: -1px; }
+.stage-tab.locked { opacity: 0.4; cursor: default; }
+.stage-tab.unlocked-flash { color: var(--ok); }
+
+/* ---- Stage panels ---- */
+#stages-panel { flex: 1; overflow: hidden; position: relative; }
+.stage-panel  { display: none; height: 100%; overflow-y: auto; padding: 20px;
+                scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+.stage-panel::-webkit-scrollbar { width: 6px; }
+.stage-panel::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+/* Stage panel inner layout */
+.stage-inner { display: grid; grid-template-columns: 340px 1fr; gap: 20px; max-width: 1200px; }
+
+/* Locked overlay */
+.locked-overlay {
+  display: none; position: absolute; inset: 0; background: rgba(13,13,13,0.8);
+  align-items: center; justify-content: center; flex-direction: column; gap: 12px;
+  backdrop-filter: blur(2px); z-index: 10; border-radius: 8px;
+}
+.locked-overlay p { color: var(--text2); font-size: 0.9rem; }
+
+/* Stage header */
+.stage-header-row { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; }
+.stage-name { font-size: 1rem; font-weight: 600; }
+.stage-status-badge {
+  font-size: 0.72rem; padding: 2px 8px; border-radius: 10px;
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+}
+.badge-idle      { background: var(--bg3); color: var(--text3); }
+.badge-init      { background: #1a2a3a; color: var(--accent); }
+.badge-ready     { background: #1a2a3a; color: var(--accent); }
+.badge-running   { background: #1a3a1a; color: var(--ok); }
+.badge-pausing   { background: #3a3a1a; color: var(--warn); }
+.badge-paused    { background: #3a2a1a; color: var(--accent2); }
+.badge-done      { background: #1a3a1a; color: var(--ok); }
+.badge-error     { background: #3a1a1a; color: var(--err); }
+.badge-resetting { background: var(--bg3); color: var(--text3); }
+
+/* Teaching copy (guided mode only) */
+.teaching-copy { display: none; color: var(--text2); font-size: 0.85rem; line-height: 1.7;
+                 background: var(--bg2); border-left: 3px solid var(--accent);
+                 padding: 10px 14px; border-radius: 0 6px 6px 0; margin-bottom: 16px; }
+
+/* Left column: settings + controls */
+.left-col { display: flex; flex-direction: column; gap: 14px; }
+
+/* Settings panel */
+.settings-panel { background: var(--bg2); border: 1px solid var(--border);
+                  border-radius: 8px; padding: 14px; }
+.settings-title { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
+                  color: var(--text3); margin-bottom: 10px; font-weight: 600; }
+.setting-row { display: flex; align-items: center; justify-content: space-between;
+               margin-bottom: 8px; gap: 10px; }
+.setting-row label { color: var(--text2); font-size: 0.82rem; white-space: nowrap; }
+.setting-row input {
+  background: var(--bg3); border: 1px solid var(--border2); color: var(--text);
+  padding: 3px 8px; border-radius: 4px; font-size: 0.82rem; font-family: var(--mono);
+  width: 90px; text-align: right; outline: none;
+}
+.setting-row input:focus { border-color: var(--accent); }
+.setting-row input:disabled { opacity: 0.4; }
+.guided-hint { font-size: 0.75rem; color: var(--text3); margin-top: 4px;
+               font-style: italic; display: none; }
+.guided-hint.show { display: block; }
+
+/* Controls */
+.controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn {
+  padding: 7px 16px; border-radius: 6px; border: 1px solid var(--border2);
+  cursor: pointer; font-size: 0.82rem; font-family: var(--font);
+  transition: border-color 0.12s, background 0.12s;
+}
+.btn:disabled { opacity: 0.35; cursor: default; }
+.btn-start    { background: #1a3a1a; color: var(--ok);    border-color: #2e5e2e; }
+.btn-start:hover:not(:disabled)    { background: #224a22; border-color: var(--ok); }
+.btn-pause    { background: #3a2a1a; color: var(--accent2); border-color: #5e4e2e; }
+.btn-pause:hover:not(:disabled)    { background: #4a3a22; border-color: var(--accent2); }
+.btn-reset    { background: var(--bg3); color: var(--text2); }
+.btn-reset:hover:not(:disabled)    { border-color: var(--err); color: var(--err); }
+.btn-download { background: var(--bg3); color: var(--text2); }
+.btn-download:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+
+/* Status line */
+.status-line { font-size: 0.75rem; color: var(--text3); font-family: var(--mono);
+               min-height: 18px; padding: 2px 0; }
+
+/* Right column: chart + samples */
+.right-col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+
+/* Loss chart */
+.chart-wrap { background: var(--bg2); border: 1px solid var(--border);
+              border-radius: 8px; overflow: hidden; }
+.chart-title { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
+               color: var(--text3); padding: 10px 14px 0; font-weight: 600; }
+canvas.loss-chart { display: block; width: 100%; height: 180px; }
+
+/* Samples pane */
+.samples-wrap { background: var(--bg2); border: 1px solid var(--border);
+                border-radius: 8px; flex: 1; min-height: 200px; display: flex;
+                flex-direction: column; overflow: hidden; }
+.samples-title { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
+                 color: var(--text3); padding: 10px 14px 0; font-weight: 600; flex-shrink: 0; }
+.samples-list  { flex: 1; overflow-y: auto; padding: 8px 14px 14px;
+                 scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+.samples-list::-webkit-scrollbar { width: 5px; }
+.samples-list::-webkit-scrollbar-thumb { background: var(--border2); }
+.sample-entry  { margin-bottom: 12px; }
+.sample-step   { font-size: 0.7rem; color: var(--text3); font-family: var(--mono); }
+.sample-text   { font-family: var(--mono); font-size: 0.78rem; color: var(--text2);
+                 white-space: pre-wrap; word-break: break-all; margin-top: 2px;
+                 background: var(--bg3); padding: 6px 8px; border-radius: 4px;
+                 max-height: 120px; overflow: hidden; }
+.samples-empty { color: var(--text3); font-size: 0.8rem; padding: 20px 0; text-align: center; }
+
+/* ---- Compare mode ---- */
+#compare-panel {
+  display: none; flex-direction: column; height: 100%; background: var(--bg);
+}
+.compare-top { display: flex; align-items: center; gap: 14px; padding: 16px 20px;
+               border-bottom: 1px solid var(--border); background: var(--bg1); flex-shrink: 0; }
+.compare-top label { color: var(--text2); font-size: 0.82rem; }
+#compare-seed { flex: 1; max-width: 320px; background: var(--bg3); border: 1px solid var(--border2);
+                color: var(--text); padding: 5px 10px; border-radius: 6px; font-family: var(--mono);
+                font-size: 0.82rem; outline: none; }
+#compare-seed:focus { border-color: var(--accent); }
+.compare-cols { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0; flex: 1; overflow: hidden; }
+.compare-col  { display: flex; flex-direction: column; border-right: 1px solid var(--border);
+                overflow: hidden; }
+.compare-col:last-child { border-right: none; }
+.compare-col-header { padding: 12px 16px; border-bottom: 1px solid var(--border);
+                      background: var(--bg1); flex-shrink: 0; }
+.compare-col-header h3 { font-size: 0.85rem; font-weight: 600; }
+.compare-col-header .compare-meta { font-size: 0.75rem; color: var(--text3); font-family: var(--mono); margin-top: 2px; }
+.compare-output { flex: 1; overflow-y: auto; padding: 14px 16px;
+                  font-family: var(--mono); font-size: 0.8rem; color: var(--text2);
+                  white-space: pre-wrap; word-break: break-all;
+                  scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+
+/* ---- Resume bar ---- */
+.resume-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+              background: #1a2a3a; border-radius: 6px; margin-bottom: 14px;
+              font-size: 0.82rem; color: var(--text2); }
+.resume-bar button { background: var(--bg3); border: 1px solid var(--border2); color: var(--text);
+                     padding: 3px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
+.resume-bar button:hover { border-color: var(--accent); }
+
+/* ---- Toast ---- */
+#toast { position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%);
+         background: var(--bg3); border: 1px solid var(--border2); color: var(--text);
+         padding: 8px 18px; border-radius: 20px; font-size: 0.82rem;
+         opacity: 0; transition: opacity 0.2s; pointer-events: none; white-space: nowrap; }
+#toast.show     { opacity: 1; }
+#toast.toast-ok   { border-color: var(--ok);  color: var(--ok); }
+#toast.toast-warn { border-color: var(--warn); color: var(--warn); }
+#toast.toast-error{ border-color: var(--err);  color: var(--err); }
+
+/* ---- Footer ---- */
+.footer-nav {
+  position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 24px; background: rgba(20,20,20,0.92); padding: 6px 18px;
+  border-radius: 20px; box-shadow: 0 1px 6px rgba(0,0,0,0.3); font-size: 0.72rem;
+  border: 1px solid var(--border);
+}
+.footer-nav a { color: var(--accent); text-decoration: none; }
+.footer-nav a:hover { text-decoration: underline; }
+
+/* ---- CPU banner ---- */
+#cpu-banner { display: none; background: #2a2a1a; border-bottom: 1px solid var(--warn);
+              padding: 6px 20px; font-size: 0.78rem; color: var(--warn); flex-shrink: 0; }
+
+/* ---- Responsive — mobile wall ---- */
+@media (max-width: 700px) {
+  #app-shell { display: none !important; }
+  #mobile-msg { display: flex; }
+}
+#mobile-msg {
+  display: none; position: fixed; inset: 0; background: var(--bg);
+  align-items: center; justify-content: center; flex-direction: column; gap: 12px;
+  padding: 40px; text-align: center;
+}
+#mobile-msg h2 { font-size: 1.1rem; }
+#mobile-msg p  { color: var(--text2); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+
+<!-- Mobile wall -->
+<div id="mobile-msg">
+  <h2>Tapasya needs a desktop browser</h2>
+  <p>WebGPU-accelerated training works on desktop Chrome, Edge, or Safari. Open this URL on your laptop.</p>
+</div>
+
+<!-- Landing -->
+<div id="landing">
+  <div>
+    <div class="landing-title"><span>Tapasya</span></div>
+    <div class="landing-sub" style="margin-top:8px;">Train a language model in your browser — three stages, no server, no account, no data leaving your device.</div>
+  </div>
+
+  <div class="landing-cards">
+    <div class="landing-card" id="btn-guided">
+      <h2>Guided tour</h2>
+      <p>Walk through all three stages with teaching copy explaining each step.</p>
+    </div>
+    <div class="landing-card" id="btn-free">
+      <h2>Free mode</h2>
+      <p>All three stages open from the start. Change any setting.</p>
+    </div>
+  </div>
+
+  <div class="landing-explainer">
+    <p>Tapasya runs three progressively sophisticated training regimes on your text corpus — byte-level minimal, byte-level with more compute, and BPE-tokenized — using only forward passes (no backprop). Each stage's output motivates the next stage's addition.</p>
+    <p>The algorithm is EGGROLL (evolution strategies) by Isaac 2025. Your corpus never leaves the tab.</p>
+  </div>
+</div>
+
+<!-- App shell -->
+<div id="app-shell" style="display:none; flex-direction:column; height:100vh;">
+
+  <!-- CPU fallback banner -->
+  <div id="cpu-banner">Running on CPU — training will be slow (WebGPU unavailable in this browser).</div>
+
+  <!-- Top bar -->
+  <div id="top-bar">
+    <span class="top-brand"><span>Tapasya</span></span>
+    <span id="stages-label"></span>
+    <div class="top-spacer"></div>
+    <button id="compare-btn" disabled title="Complete at least two stages to compare">Compare ↔</button>
+  </div>
+
+  <!-- Corpus panel -->
+  <div id="corpus-panel">
+    <div class="corpus-header">
+      <label for="corpus-input">Corpus</label>
+      <span id="corpus-char-count">0 chars</span>
+      <span id="corpus-lock-msg"></span>
+    </div>
+    <textarea id="corpus-input" placeholder="Paste plain text here — any English text works. ~10KB is ideal for the guided tour."></textarea>
+  </div>
+
+  <!-- Tab bar -->
+  <div id="tab-bar">
+    <button class="stage-tab active" id="tab-1" onclick="switchStage(1)">Stage 1 — byte / 500</button>
+    <button class="stage-tab locked" id="tab-2" onclick="switchStage(2)">Stage 2 — byte / 2000</button>
+    <button class="stage-tab locked" id="tab-3" onclick="switchStage(3)">Stage 3 — BPE / 2000</button>
+  </div>
+
+  <!-- Stages panel -->
+  <div id="stages-panel" style="flex:1; overflow:hidden; position:relative;">
+
+    <!-- Stage 1 -->
+    <div class="stage-panel" id="stage-panel-1" style="display:block;">
+      <div style="position:relative;">
+        <div class="locked-overlay" style="display:none;"><p>Locked</p></div>
+        <div class="stage-header-row" id="stage-1-header">
+          <span class="stage-name">Stage 1 — Byte-level, minimal</span>
+          <span class="stage-status-badge badge-idle" id="status-badge-1">idle</span>
+        </div>
+        <div class="teaching-copy" id="guided-copy-1">
+          This is the smallest thing that works. A 4-layer transformer with 130,000 parameters, trained on your corpus as raw bytes — vocab size 256, no tokenizer. We run it for 500 steps, about 2 minutes. Expect output that recognizably tries to be your corpus's language but fails at word boundaries.
+        </div>
+        <div class="stage-inner">
+          <div class="left-col">
+            <div class="settings-panel" id="settings-1">
+              <div class="settings-title">Settings</div>
+              <div class="setting-row"><label>Steps</label><input type="number" value="500"  min="10" data-cfg="steps"></div>
+              <div class="setting-row"><label>Pop size</label><input type="number" value="16"   min="2" step="2" data-cfg="pop_size"></div>
+              <div class="setting-row"><label>σ (sigma)</label><input type="number" value="0.05" step="0.01" data-cfg="sigma"></div>
+              <div class="setting-row"><label>LR</label><input type="number" value="0.003" step="0.001" data-cfg="lr"></div>
+              <div class="setting-row"><label>Batch size</label><input type="number" value="8"    min="1" data-cfg="batch_size"></div>
+              <div class="setting-row"><label>Seed</label><input type="number" value="42"   data-cfg="seed"></div>
+              <div class="guided-hint show" id="guided-hint-1">Settings locked in guided mode — explore them in free mode.</div>
+            </div>
+            <div class="controls">
+              <button class="btn btn-start"    onclick="onStartClick(1)">Start</button>
+              <button class="btn btn-pause"    onclick="pauseStage(1)" disabled>Pause</button>
+              <button class="btn btn-reset"    onclick="onResetClick(1)">Reset</button>
+              <button class="btn btn-download" onclick="downloadStage(1)" disabled>Download</button>
+            </div>
+            <div class="status-line" id="status-1"></div>
+          </div>
+          <div class="right-col">
+            <div class="chart-wrap">
+              <div class="chart-title">Loss</div>
+              <canvas class="loss-chart" id="chart-1" width="600" height="180"></canvas>
+            </div>
+            <div class="samples-wrap">
+              <div class="samples-title">Samples (every 10 steps, last 20)</div>
+              <div class="samples-list" id="samples-1">
+                <div class="samples-empty">Samples appear here during training.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Stage 2 -->
+    <div class="stage-panel" id="stage-panel-2" style="display:none;">
+      <div style="position:relative;">
+        <div class="locked-overlay" id="locked-overlay-2"><p>Complete Stage 1 (300+ steps) to unlock.</p></div>
+        <div class="stage-header-row" id="stage-2-header">
+          <span class="stage-name">Stage 2 — Byte-level, more compute</span>
+          <span class="stage-status-badge badge-idle" id="status-badge-2">idle</span>
+        </div>
+        <div class="teaching-copy" id="guided-copy-2">
+          Same model, same bytes, same everything — except we train for 2000 steps instead of 500. This is the compute lever. Everything Stage 1 produced, plus what another 6 minutes of training adds on top of the same architecture.
+        </div>
+        <div class="stage-inner">
+          <div class="left-col">
+            <div class="settings-panel" id="settings-2">
+              <div class="settings-title">Settings</div>
+              <div class="setting-row"><label>Steps</label><input type="number" value="2000" min="10" data-cfg="steps"></div>
+              <div class="setting-row"><label>Pop size</label><input type="number" value="16"   min="2" step="2" data-cfg="pop_size"></div>
+              <div class="setting-row"><label>σ (sigma)</label><input type="number" value="0.05" step="0.01" data-cfg="sigma"></div>
+              <div class="setting-row"><label>LR</label><input type="number" value="0.003" step="0.001" data-cfg="lr"></div>
+              <div class="setting-row"><label>Batch size</label><input type="number" value="8"    min="1" data-cfg="batch_size"></div>
+              <div class="setting-row"><label>Seed</label><input type="number" value="42"   data-cfg="seed"></div>
+              <div class="guided-hint show" id="guided-hint-2">Settings locked in guided mode.</div>
+            </div>
+            <div class="controls">
+              <button class="btn btn-start"    onclick="onStartClick(2)">Start</button>
+              <button class="btn btn-pause"    onclick="pauseStage(2)" disabled>Pause</button>
+              <button class="btn btn-reset"    onclick="onResetClick(2)">Reset</button>
+              <button class="btn btn-download" onclick="downloadStage(2)" disabled>Download</button>
+            </div>
+            <div class="status-line" id="status-2"></div>
+          </div>
+          <div class="right-col">
+            <div class="chart-wrap">
+              <div class="chart-title">Loss</div>
+              <canvas class="loss-chart" id="chart-2" width="600" height="180"></canvas>
+            </div>
+            <div class="samples-wrap">
+              <div class="samples-title">Samples (every 10 steps, last 20)</div>
+              <div class="samples-list" id="samples-2">
+                <div class="samples-empty">Samples appear here during training.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Stage 3 -->
+    <div class="stage-panel" id="stage-panel-3" style="display:none;">
+      <div style="position:relative;">
+        <div class="locked-overlay" id="locked-overlay-3"><p>Complete Stage 2 (1000+ steps) to unlock.</p></div>
+        <div class="stage-header-row" id="stage-3-header">
+          <span class="stage-name">Stage 3 — BPE-tokenized</span>
+          <span class="stage-status-badge badge-idle" id="status-badge-3">idle</span>
+        </div>
+        <div class="teaching-copy" id="guided-copy-3">
+          Now we give the model real words. We train a BPE tokenizer on your corpus that learns ~2000 sub-word tokens. The model itself is the same shape, but its embedding table now maps learned sub-words instead of raw bytes. Same 2000 training steps. This is the vocabulary lever.
+        </div>
+        <div class="stage-inner">
+          <div class="left-col">
+            <div class="settings-panel" id="settings-3">
+              <div class="settings-title">Settings</div>
+              <div class="setting-row"><label>Steps</label><input type="number" value="2000" min="10" data-cfg="steps"></div>
+              <div class="setting-row"><label>Pop size</label><input type="number" value="16"   min="2" step="2" data-cfg="pop_size"></div>
+              <div class="setting-row"><label>σ (sigma)</label><input type="number" value="0.05" step="0.01" data-cfg="sigma"></div>
+              <div class="setting-row"><label>LR</label><input type="number" value="0.003" step="0.001" data-cfg="lr"></div>
+              <div class="setting-row"><label>Batch size</label><input type="number" value="8"    min="1" data-cfg="batch_size"></div>
+              <div class="setting-row"><label>Seed</label><input type="number" value="42"   data-cfg="seed"></div>
+              <div class="guided-hint show" id="guided-hint-3">Settings locked in guided mode.</div>
+            </div>
+            <div class="controls">
+              <button class="btn btn-start"    onclick="onStartClick(3)">Start</button>
+              <button class="btn btn-pause"    onclick="pauseStage(3)" disabled>Pause</button>
+              <button class="btn btn-reset"    onclick="onResetClick(3)">Reset</button>
+              <button class="btn btn-download" onclick="downloadStage(3)" disabled>Download</button>
+            </div>
+            <div class="status-line" id="status-3"></div>
+            <div id="bpe-progress-3" style="display:none; font-size:0.75rem; color:var(--text3); font-family:var(--mono);"></div>
+          </div>
+          <div class="right-col">
+            <div class="chart-wrap">
+              <div class="chart-title">Loss</div>
+              <canvas class="loss-chart" id="chart-3" width="600" height="180"></canvas>
+            </div>
+            <div class="samples-wrap">
+              <div class="samples-title">Samples (every 10 steps, last 20)</div>
+              <div class="samples-list" id="samples-3">
+                <div class="samples-empty">Samples appear here during training.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /stages-panel -->
+
+  <!-- Compare mode -->
+  <div id="compare-panel" style="display:none; flex-direction:column; flex:1;">
+    <div class="compare-top">
+      <label for="compare-seed">Seed text</label>
+      <input id="compare-seed" type="text" placeholder="Alice was" value="Alice was">
+      <button class="btn" id="compare-regen">Regenerate all</button>
+      <div style="flex:1;"></div>
+      <button class="btn" id="compare-back">← Back to stages</button>
+    </div>
+    <div class="compare-cols">
+      <div class="compare-col" id="compare-col-1">
+        <div class="compare-col-header">
+          <h3>Stage 1 — Byte / 500 steps</h3>
+          <div class="compare-meta" id="compare-meta-1"></div>
+        </div>
+        <div class="compare-output">Not trained yet.</div>
+      </div>
+      <div class="compare-col" id="compare-col-2">
+        <div class="compare-col-header">
+          <h3>Stage 2 — Byte / 2000 steps</h3>
+          <div class="compare-meta" id="compare-meta-2"></div>
+        </div>
+        <div class="compare-output">Not trained yet.</div>
+      </div>
+      <div class="compare-col" id="compare-col-3">
+        <div class="compare-col-header">
+          <h3>Stage 3 — BPE / 2000 steps</h3>
+          <div class="compare-meta" id="compare-meta-3"></div>
+        </div>
+        <div class="compare-output">Not trained yet.</div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /app-shell -->
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<!-- Footer -->
+<div class="footer-nav">
+  <a href="https://naklitechie.github.io/">← More Projects</a>
+  <a href="https://github.com/NakliTechie/Tapasya">⌨ Source</a>
+</div>
+
+<script src="main.js"></script>
+<script>
+// ---- Glue between HTML onclick and main.js ----
+
+function onStartClick(stage) {
+  // Read free-mode settings before starting
+  if (S.mode === 'free') S.stages[stage].cfg = readSettings(stage);
+  S.stages[stage].steps = S.stages[stage].cfg.steps || (stage === 1 ? 500 : 2000);
+  startStage(stage);
+}
+
+function onResetClick(stage) {
+  if (!confirm(`Reset Stage ${stage}? This clears all training progress and the checkpoint.`)) return;
+  resetStage(stage);
+}
+
+// Show/hide teaching copy based on mode
+function applyModeToUI(mode) {
+  document.querySelectorAll('.teaching-copy').forEach(el => {
+    el.style.display = mode === 'guided' ? 'block' : 'none';
+  });
+  document.querySelectorAll('.guided-hint').forEach(el => {
+    el.style.display = mode === 'guided' ? 'block' : 'none';
+  });
+  // In free mode, unlock all tabs
+  if (mode === 'free') {
+    [2, 3].forEach(i => $(`tab-${i}`)?.classList.remove('locked'));
+    document.querySelectorAll('.locked-overlay').forEach(el => el.style.setProperty('display','none','important'));
+  }
+}
+
+// Override selectMode to also apply UI
+const _orig_selectMode = selectMode;
+window.selectMode = function(mode) {
+  _orig_selectMode(mode);
+  applyModeToUI(mode);
+};
+
+// Override updateStageUI to update badge using correct element ID
+const _orig_updateStageUI = updateStageUI;
+window.updateStageUI = function(stage) {
+  _orig_updateStageUI(stage);
+  // Sync the badge in the header (id="status-badge-N")
+  const st = S.stages[stage];
+  const badge = $(`status-badge-${stage}`);
+  if (badge) {
+    const labels = { idle:'idle', init:'initialising…', ready:'ready', running:'training',
+                     pausing:'pausing…', paused:'paused', done:'complete', resetting:'resetting…', error:'error' };
+    badge.textContent = labels[st.status] || st.status;
+    badge.className   = `stage-status-badge badge-${st.status}`;
+  }
+  // Button state
+  const panel = $(`stage-panel-${stage}`);
+  if (!panel) return;
+  const startBtn = panel.querySelector('.btn-start');
+  const pauseBtn = panel.querySelector('.btn-pause');
+  const resetBtn = panel.querySelector('.btn-reset');
+  const dlBtn    = panel.querySelector('.btn-download');
+  if (startBtn)  startBtn.disabled  = ['running','init','pausing','resetting'].includes(st.status);
+  if (pauseBtn)  pauseBtn.disabled  = st.status !== 'running';
+  if (resetBtn)  resetBtn.disabled  = ['resetting','init'].includes(st.status);
+  if (dlBtn)     dlBtn.disabled     = st.status !== 'done';
+  // Settings lock
+  if (S.mode === 'guided' || ['running','init','pausing'].includes(st.status)) {
+    panel.querySelectorAll('.settings-panel input').forEach(i => i.disabled = true);
+  } else {
+    panel.querySelectorAll('.settings-panel input').forEach(i => i.disabled = false);
+  }
+  // Locked overlay for guided mode
+  const overlay = $(`locked-overlay-${stage}`);
+  if (overlay) overlay.style.display = (S.mode === 'guided' && !st.unlocked) ? 'flex' : 'none';
+};
+
+// Detect WebGPU
+(async () => {
+  if (!navigator.gpu) {
+    const banner = $('cpu-banner');
+    if (banner) banner.style.display = 'block';
+  }
+})();
+
+// Make switchStage global
+window.switchStage = switchStage;
+</script>
+</body>
+</html>
