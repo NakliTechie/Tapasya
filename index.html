@@ -2219,6 +2219,188 @@ async function b2InspectTokenizer(url, reqId) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────
+// b2 tokenizer — ByteLevel BPE (matches HuggingFace tokenizers bit-exactly)
+// ─────────────────────────────────────────────────────────────────
+
+// GPT-2 byte encoder: bijective map 256 byte values → 256 visible unicode chars.
+// Bytes [33..126] ∪ [161..172] ∪ [174..255] map to themselves; the remaining
+// 68 "unprintable" bytes (incl. space 0x20) map to code points 256..323.
+// Space (0x20) → codepoint 288 (U+0120 'Ġ'). Newline (0x0A) → U+010A.
+function b2BuildByteEncoder() {
+  const bs = [];
+  for (let b = 33; b <= 126; b++)  bs.push(b);
+  for (let b = 161; b <= 172; b++) bs.push(b);
+  for (let b = 174; b <= 255; b++) bs.push(b);
+  const cs = bs.slice();
+  let n = 0;
+  for (let b = 0; b < 256; b++) {
+    if (!bs.includes(b)) { bs.push(b); cs.push(256 + n); n++; }
+  }
+  const encoder = new Map();   // byte (0..255) → char (string of length 1)
+  const decoder = new Map();   // char → byte
+  for (let i = 0; i < bs.length; i++) {
+    const c = String.fromCodePoint(cs[i]);
+    encoder.set(bs[i], c);
+    decoder.set(c, bs[i]);
+  }
+  return { encoder, decoder };
+}
+
+// GPT-2 pre-tokenization regex (matches the reference tokenizer's pre-tokenizer).
+// Splits on word boundaries while keeping leading spaces attached to words/numbers/punct.
+const B2_PRETOKEN_RE = /'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+/gu;
+
+let b2Tokenizer = null;  // singleton — one tokenizer loaded at a time
+
+class B2Tokenizer {
+  constructor(json) {
+    if (json.model?.type !== 'BPE') {
+      throw new Error(`unsupported tokenizer type: ${json.model?.type}`);
+    }
+    this.vocab   = json.model.vocab;                    // token (string) → id (int)
+    this.inverse = new Map();                            // id → token
+    for (const [tok, id] of Object.entries(this.vocab)) this.inverse.set(id, tok);
+
+    // Build merge rank lookup. Merges may be "a b" strings or [a, b] arrays.
+    this.mergeRanks = new Map();
+    const merges = json.model.merges || [];
+    for (let i = 0; i < merges.length; i++) {
+      const [a, b] = Array.isArray(merges[i]) ? merges[i] : merges[i].split(' ');
+      this.mergeRanks.set(a + '\u0000' + b, i);         // NUL-separated key
+    }
+
+    // Byte encoder/decoder (GPT-2 ByteLevel convention)
+    const { encoder, decoder } = b2BuildByteEncoder();
+    this.byteEncoder = encoder;
+    this.byteDecoder = decoder;
+
+    // Special / added tokens (kept atomic — never broken by BPE)
+    this.specialTokens = (json.added_tokens || []).map(t => ({ id: t.id, content: t.content }));
+    this._specialSplitRe = this.specialTokens.length
+      ? new RegExp('(' + this.specialTokens
+          .map(s => s.content.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          .join('|') + ')')
+      : null;
+    this._specialById = new Map(this.specialTokens.map(s => [s.id, s.content]));
+    this._specialByContent = new Map(this.specialTokens.map(s => [s.content, s.id]));
+  }
+
+  // Encode one pre-token to a list of BPE tokens (strings in byte-encoder alphabet)
+  _encodePretoken(pretoken) {
+    // UTF-8 encode → map each byte → single-codepoint char
+    const utf8 = new TextEncoder().encode(pretoken);
+    let s = '';
+    for (let i = 0; i < utf8.length; i++) s += this.byteEncoder.get(utf8[i]);
+    let tokens = [...s];  // array of single-codepoint strings
+    // Greedy lowest-rank BPE merge
+    while (tokens.length > 1) {
+      let bestRank = Infinity, bestIdx = -1;
+      for (let i = 0; i < tokens.length - 1; i++) {
+        const r = this.mergeRanks.get(tokens[i] + '\u0000' + tokens[i + 1]);
+        if (r !== undefined && r < bestRank) { bestRank = r; bestIdx = i; }
+      }
+      if (bestIdx === -1) break;
+      const merged = tokens[bestIdx] + tokens[bestIdx + 1];
+      tokens = [...tokens.slice(0, bestIdx), merged, ...tokens.slice(bestIdx + 2)];
+    }
+    return tokens;
+  }
+
+  encode(text) {
+    const ids = [];
+    // First split on special tokens so they stay atomic
+    const segments = this._specialSplitRe ? text.split(this._specialSplitRe) : [text];
+    for (const seg of segments) {
+      if (!seg) continue;
+      const specId = this._specialByContent.get(seg);
+      if (specId !== undefined) { ids.push(specId); continue; }
+      // Regular text: pre-tokenize, then BPE each pre-token
+      const pretokens = seg.match(B2_PRETOKEN_RE) || [];
+      for (const pt of pretokens) {
+        const bpe = this._encodePretoken(pt);
+        for (const tok of bpe) {
+          const id = this.vocab[tok];
+          if (id === undefined) throw new Error(`token not in vocab: ${JSON.stringify(tok)}`);
+          ids.push(id);
+        }
+      }
+    }
+    return ids;
+  }
+
+  decode(ids, skipSpecial = false) {
+    let out = '';
+    let buffer = '';  // accumulate byte-encoded chars between special tokens
+    const flush = () => {
+      if (!buffer) return;
+      const bytes = [];
+      for (const ch of buffer) {
+        const b = this.byteDecoder.get(ch);
+        if (b === undefined) throw new Error(`char U+${ch.codePointAt(0).toString(16)} not in byteDecoder`);
+        bytes.push(b);
+      }
+      out += new TextDecoder().decode(new Uint8Array(bytes));
+      buffer = '';
+    };
+    for (const id of ids) {
+      const specContent = this._specialById.get(id);
+      if (specContent !== undefined) {
+        flush();
+        if (!skipSpecial) out += specContent;
+      } else {
+        const tok = this.inverse.get(id);
+        if (tok === undefined) throw new Error(`id ${id} not in vocab`);
+        buffer += tok;
+      }
+    }
+    flush();
+    return out;
+  }
+}
+
+async function b2LoadTokenizer(url, reqId) {
+  const buf = await b2LoadOrFetch(url, reqId);
+  const json = JSON.parse(new TextDecoder().decode(buf));
+  b2Tokenizer = new B2Tokenizer(json);
+  return {
+    type: json.model?.type,
+    vocabSize: Object.keys(b2Tokenizer.vocab).length,
+    mergeCount: b2Tokenizer.mergeRanks.size,
+    specialTokenCount: b2Tokenizer.specialTokens.length,
+    downloadBytes: buf.byteLength,
+  };
+}
+
+async function b2UnloadTokenizer() {
+  b2Tokenizer = null;
+  return { ok: true };
+}
+
+async function b2TokenizerStatus() {
+  if (!b2Tokenizer) return { loaded: false };
+  return {
+    loaded: true,
+    vocabSize: Object.keys(b2Tokenizer.vocab).length,
+    mergeCount: b2Tokenizer.mergeRanks.size,
+    specialTokenCount: b2Tokenizer.specialTokens.length,
+  };
+}
+
+async function b2TokEncode(text) {
+  if (!b2Tokenizer) throw new Error('tokenizer not loaded — call b2:load_tokenizer first');
+  const t0 = performance.now();
+  const tokens = b2Tokenizer.encode(text);
+  return { tokens, length: tokens.length, elapsed_ms: performance.now() - t0 };
+}
+
+async function b2TokDecode(ids, opts = {}) {
+  if (!b2Tokenizer) throw new Error('tokenizer not loaded');
+  const t0 = performance.now();
+  const text = b2Tokenizer.decode(ids, opts.skipSpecial === true);
+  return { text, elapsed_ms: performance.now() - t0 };
+}
+
 async function b2InspectConfig(url, reqId) {
   const buf = await b2LoadOrFetch(url, reqId);
   const cfg = JSON.parse(new TextDecoder().decode(buf));
@@ -3141,6 +3323,11 @@ if (typeof self !== 'undefined') {
           else if (m.type === 'b2:lora_status')       data = await b2LoraStatus();
           else if (m.type === 'b2:eggroll_step')      data = await b2EggrollStep(m.tokens, m.opts || {});
           else if (m.type === 'b2:eggroll_train')     data = await b2EggrollTrain(m.tokens, { ...(m.opts || {}), _reqId: m.id });
+          else if (m.type === 'b2:load_tokenizer')    data = await b2LoadTokenizer(m.url, m.id);
+          else if (m.type === 'b2:unload_tokenizer')  data = await b2UnloadTokenizer();
+          else if (m.type === 'b2:tokenizer_status')  data = await b2TokenizerStatus();
+          else if (m.type === 'b2:tok_encode')        data = await b2TokEncode(m.text);
+          else if (m.type === 'b2:tok_decode')        data = await b2TokDecode(m.ids, m.opts || {});
           else throw new Error(`unknown b2 message: ${m.type}`);
           post({ type: 'b2:result', id: m.id, ok: true, data });
         } catch (err) {
@@ -3348,6 +3535,11 @@ window.tapasya.b2 = (() => {
     loraStatus:       ()             => send('b2:lora_status', {}),
     eggrollStep:      (tokens, opts = {}) => send('b2:eggroll_step', { tokens, opts }),
     eggrollTrain:     (tokens, opts = {}) => send('b2:eggroll_train', { tokens, opts }),
+    loadTokenizer:    (url = `${HF}/tokenizer.json`) => send('b2:load_tokenizer', { url }),
+    unloadTokenizer:  ()             => send('b2:unload_tokenizer', {}),
+    tokenizerStatus:  ()             => send('b2:tokenizer_status', {}),
+    encode:           (text)         => send('b2:tok_encode', { text }),
+    decode:           (ids, opts = {}) => send('b2:tok_decode', { ids, opts }),
     _onResult, _onProgress, _onTrainingProgress,
   };
 })();
