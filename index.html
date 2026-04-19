@@ -2704,6 +2704,8 @@ function loraInitA(seed, tid, n_elements, fan_in) {
 }
 
 // Allocate adapter buffers for each (layer, target). A: kaiming-uniform, B: zeros (identity start).
+// Each adapter keeps both a CPU-side Float32Array (the truth) and a GPU buffer (synced for forward).
+// CPU-side copy is what EGGROLL perturbs and updates; GPU buffer is rewritten before each forward.
 async function b2InitLoRA(loraCfgIn = {}) {
   if (!b2State) throw new Error('model not loaded — call b2:load_model first');
   if (b2State.lora) await b2UnloadLoRA();
@@ -2732,24 +2734,28 @@ async function b2InitLoRA(loraCfgIn = {}) {
   });
 
   let totalAdapterBytes = 0;
-  let tid = 0;
+  let nextAdapterIdx = 0;
   for (const layer of lora.layers) {
     for (const target of lora.targets) {
       const { in: in_dim, out: out_dim } = loraModuleDims(target, cfg);
       // A: [rank, in_dim], kaiming-uniform
-      const aData = loraInitA(lora.seed, tid++, lora.rank * in_dim, in_dim);
-      const aBuf  = b2MakeWeightBuffer(device, new Uint8Array(aData.buffer));
+      const A_cpu = loraInitA(lora.seed, nextAdapterIdx, lora.rank * in_dim, in_dim);
+      const aBuf  = b2MakeWeightBuffer(device, new Uint8Array(A_cpu.buffer));
       // B: [out_dim, rank], zeros — adapter starts as identity (Δ = 0)
-      const bData = new Float32Array(out_dim * lora.rank);
-      const bBuf  = b2MakeWeightBuffer(device, new Uint8Array(bData.buffer));
+      const B_cpu = new Float32Array(out_dim * lora.rank);
+      const bBuf  = b2MakeWeightBuffer(device, new Uint8Array(B_cpu.buffer));
       const key = `layers.${layer}.${target}`;
       lora.adapters.set(key, {
         layer, target,
         A: aBuf, B: bBuf,
+        A_cpu, B_cpu,                                       // CPU-side truth for EGGROLL
         Ashape: [lora.rank, in_dim],
         Bshape: [out_dim, lora.rank],
+        tidA: nextAdapterIdx * 2,                           // unique per-tensor RNG id
+        tidB: nextAdapterIdx * 2 + 1,
       });
-      totalAdapterBytes += aData.byteLength + bData.byteLength;
+      nextAdapterIdx++;
+      totalAdapterBytes += A_cpu.byteLength + B_cpu.byteLength;
     }
   }
 
@@ -2788,27 +2794,20 @@ async function b2UnloadLoRA() {
 async function b2SetAdaptersRandom(opts = {}) {
   if (!b2State?.lora) throw new Error('LoRA not initialized');
   const { device } = gpuCtx;
-  const std_a = opts.std_a ?? 0;       // additive noise std on A (0 = leave kaiming)
-  const std_b = opts.std_b ?? 0.01;    // noise std on B (typical small perturbation)
-  const seed = opts.seed ?? 99999;
+  const std_a = opts.std_a ?? 0;
+  const std_b = opts.std_b ?? 0.01;
+  const seed  = opts.seed ?? 99999;
   let tid = 0;
   for (const a of b2State.lora.adapters.values()) {
     if (std_b > 0) {
-      const [out_dim, rank] = a.Bshape;
-      const bData = new Float32Array(out_dim * rank);
-      for (let i = 0; i < bData.length; i++) {
-        bData[i] = std_b * rngInitG(seed, tid, i);
-      }
-      device.queue.writeBuffer(a.B, 0, new Uint8Array(bData.buffer));
+      for (let i = 0; i < a.B_cpu.length; i++) a.B_cpu[i] = std_b * rngInitG(seed, tid, i);
+      device.queue.writeBuffer(a.B, 0, new Uint8Array(a.B_cpu.buffer));
     }
     if (std_a > 0) {
-      const [rank, in_dim] = a.Ashape;
-      const fan_in = in_dim;
-      const bound = 1.0 / Math.sqrt(fan_in);
-      const aData = loraInitA(seed + 1, tid, rank * in_dim, fan_in);
-      // additive perturbation
-      for (let i = 0; i < aData.length; i++) aData[i] += std_a * rngInitG(seed + 2, tid, i);
-      device.queue.writeBuffer(a.A, 0, new Uint8Array(aData.buffer));
+      const [, in_dim] = a.Ashape;
+      const reInit = loraInitA(seed + 1, tid, a.A_cpu.length, in_dim);
+      for (let i = 0; i < a.A_cpu.length; i++) a.A_cpu[i] = reInit[i] + std_a * rngInitG(seed + 2, tid, i);
+      device.queue.writeBuffer(a.A, 0, new Uint8Array(a.A_cpu.buffer));
     }
     tid++;
   }
@@ -2823,12 +2822,163 @@ async function b2ResetAdapters() {
   let tid = 0;
   for (const a of lora.adapters.values()) {
     const { in: in_dim, out: out_dim } = loraModuleDims(a.target, cfg);
-    const aData = loraInitA(lora.seed, tid++, lora.rank * in_dim, in_dim);
-    const bData = new Float32Array(out_dim * lora.rank);
-    device.queue.writeBuffer(a.A, 0, new Uint8Array(aData.buffer));
-    device.queue.writeBuffer(a.B, 0, new Uint8Array(bData.buffer));
+    const aReset = loraInitA(lora.seed, tid++, lora.rank * in_dim, in_dim);
+    a.A_cpu.set(aReset);
+    a.B_cpu.fill(0);
+    device.queue.writeBuffer(a.A, 0, new Uint8Array(a.A_cpu.buffer));
+    device.queue.writeBuffer(a.B, 0, new Uint8Array(a.B_cpu.buffer));
   }
   return { ok: true, reset: lora.adapters.size };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Adapted EGGROLL — perturb only LoRA adapters, antithetic pairs, z-score fitness
+// ─────────────────────────────────────────────────────────────────
+
+// Generate the kᵗʰ population perturbation for one adapter buffer (returns Float32Array of length n).
+// Antithetic pairing: even k → +eps, odd k → -eps (with same popIdx = k>>1).
+function b2PopEps(seed, step, k, tid, n) {
+  const sign = (k % 2 === 0) ? 1 : -1;
+  const popIdx = k >> 1;
+  const eps = new Float32Array(n);
+  for (let i = 0; i < n; i++) eps[i] = sign * rngEps(seed, 0, step, popIdx, tid, i);
+  return eps;
+}
+
+// Sync one adapter's perturbed weights to GPU: perturbed = base + sigma * eps_k
+function b2SyncAdapterPerturbed(device, a, sigma, seed, step, k) {
+  const epsA = b2PopEps(seed, step, k, a.tidA, a.A_cpu.length);
+  const epsB = b2PopEps(seed, step, k, a.tidB, a.B_cpu.length);
+  const A_p = new Float32Array(a.A_cpu.length);
+  const B_p = new Float32Array(a.B_cpu.length);
+  for (let i = 0; i < a.A_cpu.length; i++) A_p[i] = a.A_cpu[i] + sigma * epsA[i];
+  for (let i = 0; i < a.B_cpu.length; i++) B_p[i] = a.B_cpu[i] + sigma * epsB[i];
+  device.queue.writeBuffer(a.A, 0, new Uint8Array(A_p.buffer));
+  device.queue.writeBuffer(a.B, 0, new Uint8Array(B_p.buffer));
+}
+
+// Sync the unperturbed (base) weights to GPU
+function b2SyncAdapterBase(device, a) {
+  device.queue.writeBuffer(a.A, 0, new Uint8Array(a.A_cpu.buffer));
+  device.queue.writeBuffer(a.B, 0, new Uint8Array(a.B_cpu.buffer));
+}
+
+// One EGGROLL step on the LoRA adapters.
+// Returns { step, losses, mean_loss, std_loss, base_loss, updated_loss }.
+async function b2EggrollStep(tokens, opts = {}) {
+  if (!b2State?.lora) throw new Error('LoRA not initialized — call b2:init_lora first');
+  const lora = b2State.lora;
+  const { device } = gpuCtx;
+  const sigma = opts.sigma ?? 0.02;
+  const lr    = opts.lr    ?? 5e-4;               // Conservative default for LoRA + EGGROLL.
+                                                   // lr=0.05 (v1 default) is ~100× too aggressive here:
+                                                   // LoRA weights start near zero so updates dominate.
+  const P     = (opts.pop_size ?? 16) & ~1;       // force even (antithetic pairs)
+  if (P < 2) throw new Error('pop_size must be ≥ 2 (and even)');
+  const seed  = opts.seed  ?? lora.seed;
+  const step  = opts.step  ?? 0;
+  const fitnessKind = opts.fitness ?? 'centered_rank';  // 'centered_rank' | 'zscore'
+
+  // 1. Sample pop fitness via P forward passes (antithetic pairs share eps with opposite sign)
+  const losses = new Float32Array(P);
+  for (let k = 0; k < P; k++) {
+    for (const a of lora.adapters.values()) {
+      b2SyncAdapterPerturbed(device, a, sigma, seed, step, k);
+    }
+    const r = await b2ForwardLoss(tokens);
+    losses[k] = r.mean_loss;
+  }
+
+  // 2. Fitness: centered rank (default) is bounded to [-1, +1] and robust to outliers;
+  //    z-score is available for comparison. High fitness = low loss.
+  let mean = 0;
+  for (let k = 0; k < P; k++) mean += losses[k];
+  mean /= P;
+  let varSum = 0;
+  for (let k = 0; k < P; k++) varSum += (losses[k] - mean) ** 2;
+  const std = Math.sqrt(varSum / P) + 1e-8;
+
+  const fitness = new Float32Array(P);
+  if (fitnessKind === 'zscore') {
+    for (let k = 0; k < P; k++) fitness[k] = -(losses[k] - mean) / std;
+  } else {
+    // Centered rank: sort ascending by loss, rank 0 (best) → +1, rank P-1 (worst) → -1
+    const indices = Array.from({length: P}, (_, i) => i);
+    indices.sort((a, b) => losses[a] - losses[b]);
+    for (let r = 0; r < P; r++) {
+      fitness[indices[r]] = 1 - 2 * r / (P - 1);
+    }
+  }
+
+  // 3. Update each adapter (gradient estimate from same eps streams, antithetic-aware)
+  // For antithetic pair (k, k+1): contribution_to_grad = (fitness_k - fitness_{k+1}) * eps_{popIdx}
+  // We just iterate all k with sign baked into b2PopEps to keep code simple.
+  const updateScale = lr / (P * sigma);
+  for (const a of lora.adapters.values()) {
+    const gradA = new Float32Array(a.A_cpu.length);
+    const gradB = new Float32Array(a.B_cpu.length);
+    for (let k = 0; k < P; k++) {
+      const f = fitness[k];
+      if (f === 0) continue;
+      const epsA = b2PopEps(seed, step, k, a.tidA, a.A_cpu.length);
+      const epsB = b2PopEps(seed, step, k, a.tidB, a.B_cpu.length);
+      for (let i = 0; i < gradA.length; i++) gradA[i] += f * epsA[i];
+      for (let i = 0; i < gradB.length; i++) gradB[i] += f * epsB[i];
+    }
+    for (let i = 0; i < a.A_cpu.length; i++) a.A_cpu[i] += updateScale * gradA[i];
+    for (let i = 0; i < a.B_cpu.length; i++) a.B_cpu[i] += updateScale * gradB[i];
+    b2SyncAdapterBase(device, a);
+  }
+
+  // 4. Optional: measure the post-update loss (one extra forward) for clean monitoring
+  let updated_loss = null;
+  if (opts.measureUpdated !== false) {
+    const r = await b2ForwardLoss(tokens);
+    updated_loss = r.mean_loss;
+  }
+
+  return {
+    step,
+    pop_size: P,
+    sigma, lr,
+    losses: Array.from(losses),
+    mean_loss: mean,
+    std_loss: std,
+    updated_loss,
+  };
+}
+
+// Run N consecutive EGGROLL steps; posts progress per step.
+async function b2EggrollTrain(tokens, opts = {}) {
+  if (!b2State?.lora) throw new Error('LoRA not initialized');
+  const steps = opts.steps ?? 10;
+  const startStep = opts.startStep ?? 0;
+  const reqId = opts._reqId;
+  const history = [];
+  let initial_loss = null;
+  if (opts.measureInitial !== false) {
+    const r = await b2ForwardLoss(tokens);
+    initial_loss = r.mean_loss;
+  }
+  const t0 = performance.now();
+  for (let s = 0; s < steps; s++) {
+    const stepIdx = startStep + s;
+    const r = await b2EggrollStep(tokens, { ...opts, step: stepIdx });
+    history.push({ step: stepIdx, mean_pop_loss: r.mean_loss, updated_loss: r.updated_loss });
+    post({ type: 'b2:training_progress', id: reqId,
+           step: stepIdx + 1, total: steps,
+           mean_pop_loss: r.mean_loss,
+           updated_loss: r.updated_loss,
+           elapsed_ms: performance.now() - t0 });
+  }
+  return {
+    initial_loss,
+    final_loss: history[history.length - 1]?.updated_loss,
+    delta: (history[history.length - 1]?.updated_loss ?? 0) - (initial_loss ?? 0),
+    steps: history.length,
+    history,
+    elapsed_ms: performance.now() - t0,
+  };
 }
 
 async function b2LoraStatus() {
@@ -2989,6 +3139,8 @@ if (typeof self !== 'undefined') {
           else if (m.type === 'b2:set_adapters_random') data = await b2SetAdaptersRandom(m.opts || {});
           else if (m.type === 'b2:reset_adapters')    data = await b2ResetAdapters();
           else if (m.type === 'b2:lora_status')       data = await b2LoraStatus();
+          else if (m.type === 'b2:eggroll_step')      data = await b2EggrollStep(m.tokens, m.opts || {});
+          else if (m.type === 'b2:eggroll_train')     data = await b2EggrollTrain(m.tokens, { ...(m.opts || {}), _reqId: m.id });
           else throw new Error(`unknown b2 message: ${m.type}`);
           post({ type: 'b2:result', id: m.id, ok: true, data });
         } catch (err) {
@@ -3116,8 +3268,9 @@ function onWorkerMessage(e) {
       if (m.stage) { S.stages[m.stage].status = 'error'; updateStageUI(m.stage); }
       break;
 
-    case 'b2:result':    window.tapasya?.b2?._onResult?.(m);    break;
-    case 'b2:progress':  window.tapasya?.b2?._onProgress?.(m);  break;
+    case 'b2:result':            window.tapasya?.b2?._onResult?.(m);             break;
+    case 'b2:progress':          window.tapasya?.b2?._onProgress?.(m);           break;
+    case 'b2:training_progress': window.tapasya?.b2?._onTrainingProgress?.(m);   break;
   }
 }
 
@@ -3170,6 +3323,11 @@ window.tapasya.b2 = (() => {
       console.log(`[b2] uploading tensors → GPU: ${msg.loaded} / ${msg.total} (${pct}%)`);
     }
   }
+  function _onTrainingProgress(msg) {
+    const dt = (msg.elapsed_ms / 1000).toFixed(1);
+    const updated = msg.updated_loss !== null ? `→ ${msg.updated_loss.toFixed(4)}` : '';
+    console.log(`[b2 train] step ${msg.step}/${msg.total}  pop_mean=${msg.mean_pop_loss.toFixed(4)} ${updated}  (${dt}s elapsed)`);
+  }
   return {
     inspectModel:     (url = `${HF}/model.safetensors`) => send('b2:inspect_model',     { url }),
     inspectTokenizer: (url = `${HF}/tokenizer.json`)    => send('b2:inspect_tokenizer', { url }),
@@ -3188,7 +3346,9 @@ window.tapasya.b2 = (() => {
     setAdaptersRandom:(opts = {})    => send('b2:set_adapters_random', { opts }),
     resetAdapters:    ()             => send('b2:reset_adapters', {}),
     loraStatus:       ()             => send('b2:lora_status', {}),
-    _onResult, _onProgress,
+    eggrollStep:      (tokens, opts = {}) => send('b2:eggroll_step', { tokens, opts }),
+    eggrollTrain:     (tokens, opts = {}) => send('b2:eggroll_train', { tokens, opts }),
+    _onResult, _onProgress, _onTrainingProgress,
   };
 })();
 
