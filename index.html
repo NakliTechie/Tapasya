@@ -907,6 +907,24 @@ fn silu_mul(@builtin(global_invocation_id) gid: vec3<u32>) {
   let x = f32_a[i];
   f32_out[i] = (x / (1.0f + exp(-x))) * f32_b[i];
 }
+
+// ── 12. matmul_bt_add (LoRA correction) ──────────────────────────
+// out[M,N] += scale * (A[M,K] @ B[N,K]^T)        (read-modify-write on f32_out)
+// cfg: x=M  y=K  z=N  w=scale  (scale is f32 bits, decoded via bitcast)
+// f32_a=A[M*K]  f32_b=B[N*K]  f32_out=base_out[M*N] (in-place r/w)
+// Used for: out += (x @ A^T) @ B^T * (alpha/rank)  on each LoRA-targeted projection
+@compute @workgroup_size(8, 8)
+fn matmul_bt_add(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let n = gid.x; let m = gid.y;
+  let M = cfg.x; let K = cfg.y; let N = cfg.z;
+  if (m >= M || n >= N) { return; }
+  let scale = bitcast<f32>(cfg.w);
+  var acc = 0.0f;
+  for (var k = 0u; k < K; k++) {
+    acc += f32_a[m * K + k] * f32_b[n * K + k];
+  }
+  f32_out[m * N + n] = f32_out[m * N + n] + scale * acc;
+}
 `;
 
 // ============================================================
@@ -1569,6 +1587,7 @@ async function initWebGPU() {
       rms_norm:     mkPL('rms_norm'),
       rope:         mkPL('rope'),
       silu_mul:     mkPL('silu_mul'),
+      matmul_bt_add: mkPL('matmul_bt_add'),
     };
 
     const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
@@ -2375,6 +2394,7 @@ async function b2LoadModel(modelUrl, configUrl, reqId) {
 
 async function b2UnloadModel() {
   if (!b2State) return { ok: true, hadModel: false };
+  if (b2State.lora) await b2UnloadLoRA();
   for (const w of b2State.weights.values()) w.buf.destroy();
   for (const k of Object.keys(b2State.act)) {
     const v = b2State.act[k];
@@ -2537,6 +2557,21 @@ async function b2ForwardLoss(tokens) {
   const go  = (pl, cfgArr, a, b, c, out, u32, dx, dy = 1) =>
     gpuPass(enc, device, bgl, df, du, pl, cfgArr, a, b, c, out, u32, dx, dy);
 
+  // LoRA correction helper: apply A then B then scaled-add to base output.
+  // No-op when LoRA is disabled or this (layer, target) isn't adapted.
+  const lora = b2State.lora;
+  const scaleBits = lora ? new Uint32Array(new Float32Array([lora.scale]).buffer)[0] : 0;
+  const applyLoRA = (target, layer, x, base_out, in_dim, out_dim) => {
+    if (!lora) return;
+    const a = lora.adapters.get(`layers.${layer}.${target}`);
+    if (!a) return;
+    const r = lora.rank;
+    // tmp [T, r] = x [T, in] @ A [r, in]^T
+    go(PL.matmul_bt,     [T, in_dim, r],                  x,            a.A, null, act.lora_tmp, null, c8(r),       c8(T));
+    // base_out += scale * (tmp @ B [out, r]^T)
+    go(PL.matmul_bt_add, [T, r, out_dim, scaleBits],      act.lora_tmp, a.B, null, base_out,     null, c8(out_dim), c8(T));
+  };
+
   let curX = act.x0, tmpX = act.x1;
 
   // Embed lookup (zero pos buffer — RoPE provides positional info inside attention)
@@ -2549,8 +2584,11 @@ async function b2ForwardLoss(tokens) {
     // ── Attention sub-layer ─────────────────────────────────────────
     go(PL.rms_norm,   [T, D],            curX,     W('input_layernorm.weight'),       null, act.norm, null, T);
     go(PL.matmul_bt,  [T, D, D],         act.norm, W('self_attn.q_proj.weight'),      null, act.Q,   null, c8(D),    c8(T));
+    applyLoRA('q_proj', l, act.norm, act.Q,  D, D);
     go(PL.matmul_bt,  [T, D, D_kv],      act.norm, W('self_attn.k_proj.weight'),      null, act.K,   null, c8(D_kv), c8(T));
+    applyLoRA('k_proj', l, act.norm, act.K,  D, D_kv);
     go(PL.matmul_bt,  [T, D, D_kv],      act.norm, W('self_attn.v_proj.weight'),      null, act.Vb,  null, c8(D_kv), c8(T));
+    applyLoRA('v_proj', l, act.norm, act.Vb, D, D_kv);
 
     // RoPE in-place on Q (H heads) and K (H_kv heads). Tables shared.
     go(PL.rope, [T, H,    dh], rope.cosBuf, rope.sinBuf, null, act.Q, null, H,    T);
@@ -2558,15 +2596,19 @@ async function b2ForwardLoss(tokens) {
 
     go(PL.causal_attn, [T, D, H, H_kv], act.Q, act.K, act.Vb, act.attn, null, H, T);
     go(PL.matmul_bt,   [T, D, D],       act.attn, W('self_attn.o_proj.weight'), null, act.proj, null, c8(D), c8(T));
+    applyLoRA('o_proj', l, act.attn, act.proj, D, D);
     go(PL.residual_add,[T * D],         curX, act.proj, null, tmpX, null, c64(T * D));
     [curX, tmpX] = [tmpX, curX];
 
     // ── FFN sub-layer (SwiGLU) ──────────────────────────────────────
     go(PL.rms_norm,   [T, D],     curX,        W('post_attention_layernorm.weight'), null, act.norm,    null, T);
     go(PL.matmul_bt,  [T, D, F],  act.norm,    W('mlp.gate_proj.weight'),            null, act.ff_gate, null, c8(F), c8(T));
+    applyLoRA('gate_proj', l, act.norm, act.ff_gate, D, F);
     go(PL.matmul_bt,  [T, D, F],  act.norm,    W('mlp.up_proj.weight'),              null, act.ff_up,   null, c8(F), c8(T));
+    applyLoRA('up_proj', l, act.norm, act.ff_up, D, F);
     go(PL.silu_mul,   [T * F],    act.ff_gate, act.ff_up,                            null, act.ff_h,    null, c64(T * F));
     go(PL.matmul_bt,  [T, F, D],  act.ff_h,    W('mlp.down_proj.weight'),            null, act.proj,    null, c8(D), c8(T));
+    applyLoRA('down_proj', l, act.ff_h, act.proj, F, D);
     go(PL.residual_add,[T * D],   curX, act.proj, null, tmpX, null, c64(T * D));
     [curX, tmpX] = [tmpX, curX];
   }
@@ -2606,6 +2648,203 @@ async function b2ForwardLoss(tokens) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────
+// LoRA — low-rank adapters injected into base linears (Phase 1, chunk 4)
+// ─────────────────────────────────────────────────────────────────
+
+const LORA_DEFAULT_TARGETS = ['q_proj', 'v_proj', 'down_proj'];
+const LORA_ALL_TARGETS     = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj'];
+
+// Map target name → {in, out} dims given a ModelConfig
+function loraModuleDims(target, cfg) {
+  const D    = cfg.d_model;
+  const D_kv = cfg.n_kv_heads * Math.floor(D / cfg.n_heads);
+  const F    = cfg.d_ff;
+  switch (target) {
+    case 'q_proj':    return { in: D, out: D    };
+    case 'k_proj':    return { in: D, out: D_kv };
+    case 'v_proj':    return { in: D, out: D_kv };
+    case 'o_proj':    return { in: D, out: D    };
+    case 'gate_proj': return { in: D, out: F    };
+    case 'up_proj':   return { in: D, out: F    };
+    case 'down_proj': return { in: F, out: D    };
+    default: throw new Error(`unknown LoRA target: ${target}`);
+  }
+}
+
+// Resolve layers spec (string or array) → array of layer indices
+function loraTargetLayers(layersSpec, n_layers) {
+  if (Array.isArray(layersSpec)) return layersSpec.filter(i => i >= 0 && i < n_layers);
+  if (layersSpec === 'all')        return Array.from({ length: n_layers }, (_, i) => i);
+  if (layersSpec === 'last_half')  {
+    const start = Math.floor(n_layers / 2);
+    return Array.from({ length: n_layers - start }, (_, i) => start + i);
+  }
+  if (layersSpec === 'first_half') {
+    const end = Math.ceil(n_layers / 2);
+    return Array.from({ length: end }, (_, i) => i);
+  }
+  if (typeof layersSpec === 'string' && layersSpec.startsWith('last_')) {
+    const n = Math.min(parseInt(layersSpec.slice(5), 10) || 10, n_layers);
+    return Array.from({ length: n }, (_, i) => n_layers - n + i);
+  }
+  throw new Error(`unknown layers spec: ${JSON.stringify(layersSpec)}`);
+}
+
+// Kaiming-uniform init (matches PEFT default: kaiming_uniform_(a=sqrt(5)) → bound = 1/sqrt(fan_in))
+// Uses our deterministic SplitMix32 hash for reproducibility.
+function loraInitA(seed, tid, n_elements, fan_in) {
+  const bound = 1.0 / Math.sqrt(fan_in);
+  const out = new Float32Array(n_elements);
+  for (let i = 0; i < n_elements; i++) {
+    const u = hash2(hash2(seed >>> 0, tid >>> 0), i >>> 0) / 4294967296;
+    out[i] = (u - 0.5) * 2 * bound;
+  }
+  return out;
+}
+
+// Allocate adapter buffers for each (layer, target). A: kaiming-uniform, B: zeros (identity start).
+async function b2InitLoRA(loraCfgIn = {}) {
+  if (!b2State) throw new Error('model not loaded — call b2:load_model first');
+  if (b2State.lora) await b2UnloadLoRA();
+  const { device } = gpuCtx;
+  const { cfg, act } = b2State;
+
+  const lora = {
+    rank:    loraCfgIn.rank    || 8,
+    alpha:   loraCfgIn.alpha   || 16,
+    targets: loraCfgIn.targets || LORA_DEFAULT_TARGETS,
+    layers:  loraTargetLayers(loraCfgIn.layers || 'all', cfg.n_layers),
+    seed:    loraCfgIn.seed    || 12345,
+    adapters: new Map(),
+  };
+  lora.scale = lora.alpha / lora.rank;
+
+  for (const t of lora.targets) {
+    if (!LORA_ALL_TARGETS.includes(t)) throw new Error(`unknown LoRA target: ${t}`);
+  }
+
+  // Allocate the [T, rank] intermediate buffer used by the LoRA correction
+  if (act.lora_tmp) act.lora_tmp.destroy();
+  act.lora_tmp = device.createBuffer({
+    size: Math.max(4, act.T * lora.rank * 4),
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+
+  let totalAdapterBytes = 0;
+  let tid = 0;
+  for (const layer of lora.layers) {
+    for (const target of lora.targets) {
+      const { in: in_dim, out: out_dim } = loraModuleDims(target, cfg);
+      // A: [rank, in_dim], kaiming-uniform
+      const aData = loraInitA(lora.seed, tid++, lora.rank * in_dim, in_dim);
+      const aBuf  = b2MakeWeightBuffer(device, new Uint8Array(aData.buffer));
+      // B: [out_dim, rank], zeros — adapter starts as identity (Δ = 0)
+      const bData = new Float32Array(out_dim * lora.rank);
+      const bBuf  = b2MakeWeightBuffer(device, new Uint8Array(bData.buffer));
+      const key = `layers.${layer}.${target}`;
+      lora.adapters.set(key, {
+        layer, target,
+        A: aBuf, B: bBuf,
+        Ashape: [lora.rank, in_dim],
+        Bshape: [out_dim, lora.rank],
+      });
+      totalAdapterBytes += aData.byteLength + bData.byteLength;
+    }
+  }
+
+  b2State.lora = lora;
+  return {
+    rank: lora.rank,
+    alpha: lora.alpha,
+    scale: lora.scale,
+    targets: lora.targets,
+    layers: lora.layers,
+    layerCount: lora.layers.length,
+    adapterCount: lora.adapters.size,
+    totalAdapterBytes,
+    perTargetParams: lora.targets.map(t => {
+      const { in: i, out: o } = loraModuleDims(t, cfg);
+      return { target: t, A_params: lora.rank * i, B_params: o * lora.rank, total: lora.rank * (i + o) };
+    }),
+  };
+}
+
+async function b2UnloadLoRA() {
+  if (!b2State || !b2State.lora) return { ok: true, hadLora: false };
+  for (const a of b2State.lora.adapters.values()) {
+    a.A.destroy();
+    a.B.destroy();
+  }
+  if (b2State.act.lora_tmp) {
+    b2State.act.lora_tmp.destroy();
+    b2State.act.lora_tmp = null;
+  }
+  b2State.lora = null;
+  return { ok: true, hadLora: true };
+}
+
+// Test helpers — perturb adapters with Gaussian noise so we can see LoRA actually moves the loss
+async function b2SetAdaptersRandom(opts = {}) {
+  if (!b2State?.lora) throw new Error('LoRA not initialized');
+  const { device } = gpuCtx;
+  const std_a = opts.std_a ?? 0;       // additive noise std on A (0 = leave kaiming)
+  const std_b = opts.std_b ?? 0.01;    // noise std on B (typical small perturbation)
+  const seed = opts.seed ?? 99999;
+  let tid = 0;
+  for (const a of b2State.lora.adapters.values()) {
+    if (std_b > 0) {
+      const [out_dim, rank] = a.Bshape;
+      const bData = new Float32Array(out_dim * rank);
+      for (let i = 0; i < bData.length; i++) {
+        bData[i] = std_b * rngInitG(seed, tid, i);
+      }
+      device.queue.writeBuffer(a.B, 0, new Uint8Array(bData.buffer));
+    }
+    if (std_a > 0) {
+      const [rank, in_dim] = a.Ashape;
+      const fan_in = in_dim;
+      const bound = 1.0 / Math.sqrt(fan_in);
+      const aData = loraInitA(seed + 1, tid, rank * in_dim, fan_in);
+      // additive perturbation
+      for (let i = 0; i < aData.length; i++) aData[i] += std_a * rngInitG(seed + 2, tid, i);
+      device.queue.writeBuffer(a.A, 0, new Uint8Array(aData.buffer));
+    }
+    tid++;
+  }
+  return { ok: true, perturbed: b2State.lora.adapters.size, std_a, std_b };
+}
+
+async function b2ResetAdapters() {
+  if (!b2State?.lora) throw new Error('LoRA not initialized');
+  const { device } = gpuCtx;
+  const { cfg } = b2State;
+  const lora = b2State.lora;
+  let tid = 0;
+  for (const a of lora.adapters.values()) {
+    const { in: in_dim, out: out_dim } = loraModuleDims(a.target, cfg);
+    const aData = loraInitA(lora.seed, tid++, lora.rank * in_dim, in_dim);
+    const bData = new Float32Array(out_dim * lora.rank);
+    device.queue.writeBuffer(a.A, 0, new Uint8Array(aData.buffer));
+    device.queue.writeBuffer(a.B, 0, new Uint8Array(bData.buffer));
+  }
+  return { ok: true, reset: lora.adapters.size };
+}
+
+async function b2LoraStatus() {
+  if (!b2State?.lora) return { initialized: false };
+  const lora = b2State.lora;
+  return {
+    initialized: true,
+    rank: lora.rank,
+    alpha: lora.alpha,
+    scale: lora.scale,
+    targets: lora.targets,
+    layerCount: lora.layers.length,
+    adapterCount: lora.adapters.size,
+  };
+}
+
 // Forward pass that ALSO returns intermediate-layer probes for verification against numpy reference.
 // Slower (extra readbacks) — use only for debugging.
 async function b2ForwardLossWithProbes(tokens) {
@@ -2633,32 +2872,44 @@ async function b2ForwardLossWithProbes(tokens) {
   const go  = (pl, cfgArr, a, b, c, out, u32, dx, dy = 1) =>
     gpuPass(enc, device, bgl, df, du, pl, cfgArr, a, b, c, out, u32, dx, dy);
 
+  const lora = b2State.lora;
+  const scaleBits = lora ? new Uint32Array(new Float32Array([lora.scale]).buffer)[0] : 0;
+  const applyLoRA = (target, layer, x, base_out, in_dim, out_dim) => {
+    if (!lora) return;
+    const a = lora.adapters.get(`layers.${layer}.${target}`);
+    if (!a) return;
+    const r = lora.rank;
+    go(PL.matmul_bt,     [T, in_dim, r],             x,            a.A, null, act.lora_tmp, null, c8(r),       c8(T));
+    go(PL.matmul_bt_add, [T, r, out_dim, scaleBits], act.lora_tmp, a.B, null, base_out,     null, c8(out_dim), c8(T));
+  };
+
   let curX = act.x0, tmpX = act.x1;
   go(PL.embed_add, [T, D], weights.get('model.embed_tokens.weight').buf, act.zeros, null, curX, tokBuf, c64(T * D));
-
-  // Capture buffers for layer 0 probes (we copy these to readback at the end)
-  let probeAfterEmbed   = curX;     // alias only — readback before next overwrite is at the very start
-  let probeQAfterRope   = act.Q;
-  let probeKAfterRope   = act.K;
-  let probeAttnOut      = act.attn;
 
   for (let l = 0; l < L; l++) {
     const W = (k) => weights.get(`model.layers.${l}.${k}`).buf;
     go(PL.rms_norm,  [T, D],        curX,     W('input_layernorm.weight'), null, act.norm, null, T);
     go(PL.matmul_bt, [T, D, D],     act.norm, W('self_attn.q_proj.weight'),null, act.Q,   null, c8(D),    c8(T));
+    applyLoRA('q_proj', l, act.norm, act.Q,  D, D);
     go(PL.matmul_bt, [T, D, D_kv],  act.norm, W('self_attn.k_proj.weight'),null, act.K,   null, c8(D_kv), c8(T));
+    applyLoRA('k_proj', l, act.norm, act.K,  D, D_kv);
     go(PL.matmul_bt, [T, D, D_kv],  act.norm, W('self_attn.v_proj.weight'),null, act.Vb,  null, c8(D_kv), c8(T));
+    applyLoRA('v_proj', l, act.norm, act.Vb, D, D_kv);
     go(PL.rope, [T, H,    dh], rope.cosBuf, rope.sinBuf, null, act.Q, null, H,    T);
     go(PL.rope, [T, H_kv, dh], rope.cosBuf, rope.sinBuf, null, act.K, null, H_kv, T);
     go(PL.causal_attn, [T, D, H, H_kv], act.Q, act.K, act.Vb, act.attn, null, H, T);
     go(PL.matmul_bt,   [T, D, D],       act.attn, W('self_attn.o_proj.weight'), null, act.proj, null, c8(D), c8(T));
+    applyLoRA('o_proj', l, act.attn, act.proj, D, D);
     go(PL.residual_add,[T * D],         curX, act.proj, null, tmpX, null, c64(T * D));
     [curX, tmpX] = [tmpX, curX];
     go(PL.rms_norm,  [T, D],     curX,     W('post_attention_layernorm.weight'), null, act.norm, null, T);
     go(PL.matmul_bt, [T, D, F],  act.norm, W('mlp.gate_proj.weight'), null, act.ff_gate, null, c8(F), c8(T));
+    applyLoRA('gate_proj', l, act.norm, act.ff_gate, D, F);
     go(PL.matmul_bt, [T, D, F],  act.norm, W('mlp.up_proj.weight'),   null, act.ff_up,   null, c8(F), c8(T));
+    applyLoRA('up_proj', l, act.norm, act.ff_up, D, F);
     go(PL.silu_mul,  [T * F],    act.ff_gate, act.ff_up, null, act.ff_h, null, c64(T * F));
     go(PL.matmul_bt, [T, F, D],  act.ff_h, W('mlp.down_proj.weight'), null, act.proj, null, c8(D), c8(T));
+    applyLoRA('down_proj', l, act.ff_h, act.proj, F, D);
     go(PL.residual_add,[T * D],  curX, act.proj, null, tmpX, null, c64(T * D));
     [curX, tmpX] = [tmpX, curX];
   }
@@ -2733,6 +2984,11 @@ if (typeof self !== 'undefined') {
           else if (m.type === 'b2:forward_loss')      data = await b2ForwardLoss(m.tokens);
           else if (m.type === 'b2:forward_loss_probe') data = await b2ForwardLossWithProbes(m.tokens);
           else if (m.type === 'b2:model_status')      data = await b2ModelStatus();
+          else if (m.type === 'b2:init_lora')         data = await b2InitLoRA(m.loraCfg || {});
+          else if (m.type === 'b2:unload_lora')       data = await b2UnloadLoRA();
+          else if (m.type === 'b2:set_adapters_random') data = await b2SetAdaptersRandom(m.opts || {});
+          else if (m.type === 'b2:reset_adapters')    data = await b2ResetAdapters();
+          else if (m.type === 'b2:lora_status')       data = await b2LoraStatus();
           else throw new Error(`unknown b2 message: ${m.type}`);
           post({ type: 'b2:result', id: m.id, ok: true, data });
         } catch (err) {
@@ -2927,6 +3183,11 @@ window.tapasya.b2 = (() => {
     forwardLoss:      (tokens)       => send('b2:forward_loss', { tokens }),
     forwardLossProbe: (tokens)       => send('b2:forward_loss_probe', { tokens }),
     modelStatus:      ()             => send('b2:model_status', {}),
+    initLoRA:         (loraCfg = {}) => send('b2:init_lora', { loraCfg }),
+    unloadLoRA:       ()             => send('b2:unload_lora', {}),
+    setAdaptersRandom:(opts = {})    => send('b2:set_adapters_random', { opts }),
+    resetAdapters:    ()             => send('b2:reset_adapters', {}),
+    loraStatus:       ()             => send('b2:lora_status', {}),
     _onResult, _onProgress,
   };
 })();
