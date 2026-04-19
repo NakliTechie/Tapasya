@@ -7,6 +7,7 @@
 <meta name="description" content="Train a language model in your browser — three stages, no server, no account.">
 <meta name="version" content="0.1.0">
 <title>Tapasya — browser-native model training</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230d0d0d'/%3E%3Ctext x='50%25' y='52%25' dominant-baseline='central' text-anchor='middle' font-family='-apple-system,Segoe%20UI,sans-serif' font-size='42' font-weight='800' fill='%234e9af1'%3ET%3C/text%3E%3C/svg%3E">
 <style>
 /* ---- Reset + tokens ---- */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -788,50 +789,47 @@ fn gelu_inplace(@builtin(global_invocation_id) gid: vec3<u32>) {
   f32_out[i] = 0.5f * x * (1.0f + tanh(SQRT_2_PI * (x + 0.044715f * x * x * x)));
 }
 
-// ── 7. causal_attn ────────────────────────────────────────────────
-// out[T,D] = causal multi-head attention(Q[T,D], K[T,D], V[T,D])
-// cfg: x=T  y=D  z=H
+// ── 7. causal_attn (GQA-aware) ────────────────────────────────────
+// out[T,D_q] = causal grouped-query attention(Q[T,D_q], K[T,D_kv], V[T,D_kv])
+// cfg: x=T  y=D_q  z=H (num_q_heads)  w=H_kv (num_kv_heads)
 // f32_a=Q  f32_b=K  f32_c=V  f32_out=attn_out
-// Dispatch: (1, T) workgroups with workgroup_size(H, 1)
-// → gid.x=head  gid.y=query_pos
-@compute @workgroup_size(4, 1)
+// Dispatch: (H, T) workgroups with workgroup_size(1,1)
+// → gid.x=q_head  gid.y=query_pos
+@compute @workgroup_size(1, 1)
 fn causal_attn(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let h = gid.x;
-  let i = gid.y;
-  let T = cfg.x; let D = cfg.y; let H = cfg.z;
+  let h = gid.x; let i = gid.y;
+  let T = cfg.x; let D_q = cfg.y; let H = cfg.z; let H_kv = cfg.w;
   if (h >= H || i >= T) { return; }
-  let dh    = D / H;
-  let scale = 1.0f / sqrt(f32(dh));
-  let h_off = h * dh;
+  let dh       = D_q / H;
+  let q_per_kv = H / H_kv;
+  let kv_h     = h / q_per_kv;
+  let D_kv     = H_kv * dh;
+  let scale    = 1.0f / sqrt(f32(dh));
+  let h_off    = h * dh;
+  let kv_h_off = kv_h * dh;
 
-  // Compute attention scores for all past/current positions (causal mask)
-  var scores: array<f32, 128>;   // 128 = ctx_len (compile-time constant)
+  // Compute attention scores (causal mask)
+  var scores: array<f32, 512>;   // supports ctx_len up to 512
   var mx = -1e9f;
   for (var j = 0u; j <= i; j++) {
     var s = 0.0f;
     for (var d = 0u; d < dh; d++) {
-      s += f32_a[i * D + h_off + d] * f32_b[j * D + h_off + d];
+      s += f32_a[i * D_q + h_off + d] * f32_b[j * D_kv + kv_h_off + d];
     }
-    s *= scale;
-    scores[j] = s;
+    s *= scale; scores[j] = s;
     if (s > mx) { mx = s; }
   }
 
   // Numerically stable softmax
   var sum_exp = 0.0f;
-  for (var j = 0u; j <= i; j++) {
-    scores[j] = exp(scores[j] - mx);
-    sum_exp  += scores[j];
-  }
+  for (var j = 0u; j <= i; j++) { scores[j] = exp(scores[j] - mx); sum_exp += scores[j]; }
   for (var j = 0u; j <= i; j++) { scores[j] /= sum_exp; }
 
   // Weighted sum of V
   for (var d = 0u; d < dh; d++) {
     var val = 0.0f;
-    for (var j = 0u; j <= i; j++) {
-      val += scores[j] * f32_c[j * D + h_off + d];
-    }
-    f32_out[i * D + h_off + d] = val;
+    for (var j = 0u; j <= i; j++) { val += scores[j] * f32_c[j * D_kv + kv_h_off + d]; }
+    f32_out[i * D_q + h_off + d] = val;
   }
 }
 
@@ -853,6 +851,61 @@ fn cross_entropy(@builtin(global_invocation_id) gid: vec3<u32>) {
   for (var v = 0u; v < V; v++) { sum_exp += exp(f32_a[off + v] - mx); }
   let tgt    = u32_a[t];
   f32_out[t] = -(f32_a[off + tgt] - mx - log(sum_exp));
+}
+
+// ── 9. rms_norm ───────────────────────────────────────────────────
+// out[T,D] = gamma[D] * x[T,D] / rms(x[T,D])
+// cfg: x=T  y=D
+// f32_a=x[T*D]  f32_b=gamma[D]  f32_out=out[T*D]
+// Dispatch: T workgroups with workgroup_size(1)
+@compute @workgroup_size(1)
+fn rms_norm(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let t = gid.x; let T = cfg.x; let D = cfg.y;
+  if (t >= T) { return; }
+  let off = t * D;
+  var ms = 0.0f;
+  for (var d = 0u; d < D; d++) { let x = f32_a[off + d]; ms += x * x; }
+  let inv_rms = inverseSqrt(ms / f32(D) + 1e-5f);
+  for (var d = 0u; d < D; d++) { f32_out[off + d] = f32_b[d] * f32_a[off + d] * inv_rms; }
+}
+
+// ── 10. rope (Llama / GPT-NeoX half-rotation) ────────────────────
+// Apply rotary position embeddings in-place to Q or K.
+// cfg: x=T  y=H (num_heads)  z=dh (head_dim)
+// f32_a=cos_table[T*(dh/2)]  f32_b=sin_table[T*(dh/2)]  f32_out=QorK[T*H*dh] (in-place r/w)
+// Dispatch: (H, T) workgroups with workgroup_size(1,1)
+//
+// Half-rotation convention (NOT pair-wise — this matters for weight compatibility):
+//   For each j in 0..half-1:
+//     out[j]        = x[j]        * cos[j] - x[j+half] * sin[j]
+//     out[j+half]   = x[j+half]   * cos[j] + x[j]      * sin[j]
+@compute @workgroup_size(1, 1)
+fn rope(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let h = gid.x; let t = gid.y;
+  let T = cfg.x; let H = cfg.y; let dh = cfg.z;
+  if (h >= H || t >= T) { return; }
+  let half_dh = dh / 2u;
+  let q_off   = t * H * dh + h * dh;
+  let cos_off = t * half_dh;
+  for (var i = 0u; i < half_dh; i++) {
+    let x0 = f32_out[q_off + i];                    // first half element
+    let x1 = f32_out[q_off + i + half_dh];          // matching second half element
+    let c  = f32_a[cos_off + i];
+    let s  = f32_b[cos_off + i];
+    f32_out[q_off + i]           = x0 * c - x1 * s;
+    f32_out[q_off + i + half_dh] = x1 * c + x0 * s;
+  }
+}
+
+// ── 11. silu_mul ─────────────────────────────────────────────────
+// out[N] = silu(f32_a[N]) * f32_b[N]   where silu(x) = x * sigmoid(x)
+// cfg: x=N
+// Dispatch: ceil(N/64) workgroups with workgroup_size(64)
+@compute @workgroup_size(64)
+fn silu_mul(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x; if (i >= cfg.x) { return; }
+  let x = f32_a[i];
+  f32_out[i] = (x / (1.0f + exp(-x))) * f32_b[i];
 }
 `;
 
@@ -1450,7 +1503,18 @@ const DEFAULT_CFG = {
 const STAGE_STEPS = { 1: 500, 2: 2000, 3: 2000 };
 
 function makeModelCfg(stage) {
-  return { vocab_size: stage === 3 ? 2000 : 256, d_model: 64, n_heads: 4, n_layers: 4, ctx_len: 128, d_ff: 256 };
+  return {
+    vocab_size: stage === 3 ? 2000 : 256,
+    d_model:    64,
+    n_heads:    4,
+    n_kv_heads: 4,         // same as n_heads → MHA (v1); SmolLM-135M uses 3 for GQA
+    n_layers:   4,
+    ctx_len:    128,
+    d_ff:       256,
+    norm_type:  'layernorm',  // 'layernorm' | 'rmsnorm'
+    rope:       false,        // true → use RoPE instead of learned pos embed
+    activation: 'gelu',       // 'gelu' | 'silu_gated'
+  };
 }
 
 // stages[1|2|3] → { model, trainTokens, valTokens, cfg, step, running, history, sampleHistory, corpusHash }
@@ -1502,6 +1566,9 @@ async function initWebGPU() {
       gelu_inplace: mkPL('gelu_inplace'),
       causal_attn:  mkPL('causal_attn'),
       cross_entropy: mkPL('cross_entropy'),
+      rms_norm:     mkPL('rms_norm'),
+      rope:         mkPL('rope'),
+      silu_mul:     mkPL('silu_mul'),
     };
 
     const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
@@ -1513,7 +1580,8 @@ async function initWebGPU() {
     const act = {
       x0: mkA(128*64), x1: mkA(128*64), norm: mkA(128*64),
       Q:  mkA(128*64), K:  mkA(128*64), Vb:  mkA(128*64),
-      attn: mkA(128*64), proj: mkA(128*64), ff_h: mkA(128*256),
+      attn: mkA(128*64), proj: mkA(128*64),
+      ff_h: mkA(128*256), ff_gate: mkA(128*256), ff_up: mkA(128*256),
       logits: mkA(128*2000),
       perTokenLoss: mkA(128),
       lossStage: device.createBuffer({
@@ -1597,7 +1665,10 @@ async function forwardLossGPU(model, tokens, targets) {
   const { device, bgl, pl: PL, act, df, du } = gpuCtx;
   const gpuM = gpuModelBufs;
   const T    = tokens.length;
-  const { vocab_size: V, d_model: D, n_heads: H, n_layers: L, d_ff: F } = model.cfg;
+  const { vocab_size: V, d_model: D, n_heads: H, n_kv_heads: H_kv = H,
+          n_layers: L, d_ff: F,
+          norm_type = 'layernorm', rope: useRope = false, activation = 'gelu' } = model.cfg;
+  const D_kv = H_kv * Math.floor(D / H);
 
   const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
   const mkU32 = arr => {
@@ -1615,26 +1686,41 @@ async function forwardLossGPU(model, tokens, targets) {
   const go  = (pl, cfg, a, b, c, out, u32, dx, dy = 1) =>
     gpuPass(enc, device, bgl, df, du, pl, cfg, a, b, c, out, u32, dx, dy);
 
+  // norm abstraction: layernorm (with bias) or rmsnorm (no mean, no bias)
+  const doNorm = norm_type === 'rmsnorm'
+    ? (t, d, x, g, _b, out) => go(PL.rms_norm,   [t, d], x, g, null, out, null, t)
+    : (t, d, x, g,  b, out) => go(PL.layer_norm, [t, d], x, g, b,    out, null, t);
+
   let curX = act.x0, tmpX = act.x1;
   go(PL.embed_add, [T, D], gpuM.embed, gpuM.pos_embed, null, curX, tokBuf, c64(T * D));
   for (let l = 0; l < L; l++) {
     const blk = gpuM.blocks[l];
-    go(PL.layer_norm,   [T, D],    curX,     blk.ln1_g, blk.ln1_b, act.norm, null, T);
-    go(PL.matmul,       [T, D, D], act.norm, blk.wq,    null,      act.Q,    null, c8(D), c8(T));
-    go(PL.matmul,       [T, D, D], act.norm, blk.wk,    null,      act.K,    null, c8(D), c8(T));
-    go(PL.matmul,       [T, D, D], act.norm, blk.wv,    null,      act.Vb,   null, c8(D), c8(T));
-    go(PL.causal_attn,  [T, D, H], act.Q,    act.K,     act.Vb,    act.attn, null, 1,     T);
-    go(PL.matmul,       [T, D, D], act.attn, blk.wo,    null,      act.proj, null, c8(D), c8(T));
-    go(PL.residual_add, [T * D],   curX,     act.proj,  null,      tmpX,     null, c64(T * D));
+    // ── attention sub-layer ───────────────────────────────────────
+    doNorm(T, D, curX, blk.ln1_g, blk.ln1_b, act.norm);
+    go(PL.matmul,       [T, D, D],        act.norm, blk.wq, null, act.Q,  null, c8(D),    c8(T));
+    go(PL.matmul,       [T, D, D_kv],     act.norm, blk.wk, null, act.K,  null, c8(D_kv), c8(T));
+    go(PL.matmul,       [T, D, D_kv],     act.norm, blk.wv, null, act.Vb, null, c8(D_kv), c8(T));
+    go(PL.causal_attn,  [T, D, H, H_kv],  act.Q,  act.K, act.Vb, act.attn, null, H, T);
+    go(PL.matmul,       [T, D, D],         act.attn, blk.wo, null, act.proj, null, c8(D), c8(T));
+    go(PL.residual_add, [T * D],           curX, act.proj, null, tmpX, null, c64(T * D));
     [curX, tmpX] = [tmpX, curX];
-    go(PL.layer_norm,   [T, D],    curX,     blk.ln2_g, blk.ln2_b, act.norm,  null, T);
-    go(PL.matmul,       [T, D, F], act.norm, blk.ff1,   null,      act.ff_h,  null, c8(F), c8(T));
-    go(PL.gelu_inplace, [T * F],   null,     null,      null,      act.ff_h,  null, c64(T * F));
-    go(PL.matmul,       [T, F, D], act.ff_h, blk.ff2,   null,      act.proj,  null, c8(D), c8(T));
-    go(PL.residual_add, [T * D],   curX,     act.proj,  null,      tmpX,      null, c64(T * D));
+    // ── FFN sub-layer ─────────────────────────────────────────────
+    doNorm(T, D, curX, blk.ln2_g, blk.ln2_b, act.norm);
+    if (activation === 'silu_gated') {
+      // SwiGLU: out = (silu(x@W_gate) * (x@W_up)) @ W_down
+      go(PL.matmul,    [T, D, F],  act.norm,    blk.ff_gate, null, act.ff_gate, null, c8(F), c8(T));
+      go(PL.matmul,    [T, D, F],  act.norm,    blk.ff1,     null, act.ff_up,   null, c8(F), c8(T));
+      go(PL.silu_mul,  [T * F],    act.ff_gate, act.ff_up,   null, act.ff_h,    null, c64(T * F));
+      go(PL.matmul,    [T, F, D],  act.ff_h,    blk.ff2,     null, act.proj,    null, c8(D), c8(T));
+    } else {
+      go(PL.matmul,       [T, D, F], act.norm, blk.ff1, null, act.ff_h, null, c8(F), c8(T));
+      go(PL.gelu_inplace, [T * F],   null,     null,    null, act.ff_h, null, c64(T * F));
+      go(PL.matmul,       [T, F, D], act.ff_h, blk.ff2, null, act.proj, null, c8(D), c8(T));
+    }
+    go(PL.residual_add, [T * D], curX, act.proj, null, tmpX, null, c64(T * D));
     [curX, tmpX] = [tmpX, curX];
   }
-  go(PL.layer_norm,    [T, D],    curX,      gpuM.ln_f_g, gpuM.ln_f_b, act.norm,         null,   T);
+  doNorm(T, D, curX, gpuM.ln_f_g, gpuM.ln_f_b, act.norm);
   go(PL.matmul_bt,     [T, D, V], act.norm,  gpuM.embed,  null,        act.logits,        null,   c8(V), c8(T));
   go(PL.cross_entropy, [T, V],    act.logits, null,        null,        act.perTokenLoss,  tgtBuf, T);
 
@@ -1917,6 +2003,701 @@ async function handleGenerate(msg) {
 }
 
 // ============================================================
+// b2 — model loading + safetensors parsing  (Phase 1)
+// Self-contained module. Triggered by 'b2:*' messages.
+// ============================================================
+
+const B2_CACHE = 'tapasya-b2-v1';
+
+// Streaming fetch with Cache Storage caching and per-chunk progress events.
+// On cache hit, returns instantly; on miss, downloads + stores for next time.
+async function b2LoadOrFetch(url, reqId) {
+  const cache = await caches.open(B2_CACHE);
+  const hit = await cache.match(url);
+  if (hit) {
+    post({ type: 'b2:progress', id: reqId, stage: 'cache_hit', url, loaded: 1, total: 1 });
+    return await hit.arrayBuffer();
+  }
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`fetch ${url}: HTTP ${resp.status}`);
+  const total = parseInt(resp.headers.get('content-length') || '0', 10);
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let loaded = 0, lastReport = 0;
+  post({ type: 'b2:progress', id: reqId, stage: 'downloading', url, loaded: 0, total });
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.byteLength;
+    if (loaded - lastReport >= 524288 || loaded === total) {  // 512KB throttle
+      post({ type: 'b2:progress', id: reqId, stage: 'downloading', url, loaded, total });
+      lastReport = loaded;
+    }
+  }
+  const buf = new Uint8Array(loaded);
+  let off = 0;
+  for (const c of chunks) { buf.set(c, off); off += c.byteLength; }
+  // Cache persistence is best-effort: a quota error shouldn't fail the load.
+  try {
+    await cache.put(url, new Response(buf, {
+      headers: { 'content-type': 'application/octet-stream' },
+    }));
+    post({ type: 'b2:progress', id: reqId, stage: 'cached', url, loaded, total });
+  } catch (e) {
+    post({ type: 'b2:progress', id: reqId, stage: 'cache_skipped', url, loaded, total, reason: e.message });
+  }
+  return buf.buffer;
+}
+
+// Parse safetensors binary: [u64 LE header_size][JSON header][packed tensor data]
+function b2ParseSafetensors(arrayBuf) {
+  const view = new DataView(arrayBuf);
+  const lo = view.getUint32(0, true);
+  const hi = view.getUint32(4, true);
+  if (hi !== 0) throw new Error('safetensors header > 4GB not supported');
+  const headerSize = lo;
+  const headerBytes = new Uint8Array(arrayBuf, 8, headerSize);
+  const header = JSON.parse(new TextDecoder().decode(headerBytes));
+  const dataStart = 8 + headerSize;
+  const tensorNames = Object.keys(header).filter(k => k !== '__metadata__');
+  return {
+    metadata: header.__metadata__ || {},
+    tensorNames,
+    header,
+    headerSize,
+    dataStart,
+    getTensorBytes(name) {
+      const t = header[name];
+      if (!t) throw new Error(`tensor ${name} not in safetensors`);
+      const [start, end] = t.data_offsets;
+      return { dtype: t.dtype, shape: t.shape,
+               bytes: new Uint8Array(arrayBuf, dataStart + start, end - start) };
+    },
+  };
+}
+
+// bf16 → f16 conversion (returns Uint16Array of f16 bit patterns).
+// bf16: [sign 1][exp 8 bias=127][mantissa 7]
+// f16:  [sign 1][exp 5 bias=15 ][mantissa 10]
+function b2Bf16ToF16(bf16Bytes) {
+  const n = bf16Bytes.byteLength / 2;
+  const src = new DataView(bf16Bytes.buffer, bf16Bytes.byteOffset, bf16Bytes.byteLength);
+  const out = new Uint16Array(n);
+  for (let i = 0; i < n; i++) {
+    const b      = src.getUint16(i * 2, true);
+    const sign   = (b >> 15) & 0x1;
+    const expBf  = (b >> 7) & 0xff;
+    const mantBf = b & 0x7f;
+    let expF16, mantF16;
+    if (expBf === 0) {
+      expF16 = 0; mantF16 = 0;                              // zero/subnormal → zero
+    } else if (expBf === 0xff) {
+      expF16 = 0x1f;                                        // inf/nan → inf/nan
+      mantF16 = mantBf ? ((mantBf << 3) | 0x200) : 0;
+    } else {
+      const realExp = expBf - 127;
+      if (realExp > 15) { expF16 = 0x1f; mantF16 = 0; }     // overflow → +inf
+      else if (realExp < -14) { expF16 = 0; mantF16 = 0; }  // underflow → 0 (skip subnormals)
+      else { expF16 = realExp + 15; mantF16 = mantBf << 3; }
+    }
+    out[i] = (sign << 15) | (expF16 << 10) | mantF16;
+  }
+  return out;
+}
+
+// f16 → f32 conversion (for shader-f16 fallback path)
+function b2F16ToF32(f16Bytes) {
+  const n = f16Bytes.byteLength / 2;
+  const src = new DataView(f16Bytes.buffer, f16Bytes.byteOffset, f16Bytes.byteLength);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const h    = src.getUint16(i * 2, true);
+    const sign = (h >> 15) & 0x1;
+    const exp  = (h >> 10) & 0x1f;
+    const mant = h & 0x3ff;
+    let f;
+    if (exp === 0)        f = mant === 0 ? 0 : (mant / 1024) * Math.pow(2, -14);
+    else if (exp === 0x1f) f = mant ? NaN : Infinity;
+    else                   f = (1 + mant / 1024) * Math.pow(2, exp - 15);
+    out[i] = sign ? -f : f;
+  }
+  return out;
+}
+
+// Decode first N elements of a tensor as f32 (for human-readable preview)
+function b2DecodeFloatsHead(dtype, bytes, n) {
+  if (dtype === 'F32') {
+    const slice = bytes.slice(0, n * 4);                    // .slice() copies → aligned
+    return Array.from(new Float32Array(slice.buffer));
+  }
+  if (dtype === 'F16')  return Array.from(b2F16ToF32(bytes.slice(0, n * 2)));
+  if (dtype === 'BF16') {
+    const f16 = b2Bf16ToF16(bytes.slice(0, n * 2));
+    return Array.from(b2F16ToF32(new Uint8Array(f16.buffer)));
+  }
+  return null;
+}
+
+// Group tensor names by dotted prefix (e.g. 'model.layers') to summarise structure
+function b2GroupNames(names) {
+  const groups = {};
+  for (const n of names) {
+    const prefix = n.split('.').slice(0, 2).join('.');
+    groups[prefix] = (groups[prefix] || 0) + 1;
+  }
+  return groups;
+}
+
+async function b2InspectModel(url, reqId) {
+  const buf = await b2LoadOrFetch(url, reqId);
+  const sf = b2ParseSafetensors(buf);
+  const dtypes = {};
+  let totalBytes = 0;
+  for (const name of sf.tensorNames) {
+    const t = sf.header[name];
+    dtypes[t.dtype] = (dtypes[t.dtype] || 0) + 1;
+    totalBytes += t.data_offsets[1] - t.data_offsets[0];
+  }
+  let sample = null;
+  if (sf.tensorNames.length) {
+    const first = sf.getTensorBytes(sf.tensorNames[0]);
+    sample = {
+      name: sf.tensorNames[0],
+      dtype: first.dtype,
+      shape: first.shape,
+      firstValues: b2DecodeFloatsHead(first.dtype, first.bytes, 4),
+    };
+  }
+  return {
+    url,
+    downloadBytes: buf.byteLength,
+    headerBytes: sf.headerSize,
+    metadata: sf.metadata,
+    tensorCount: sf.tensorNames.length,
+    dtypes,
+    totalTensorBytes: totalBytes,
+    sampleTensor: sample,
+    namesByPrefix: b2GroupNames(sf.tensorNames),
+  };
+}
+
+async function b2InspectTokenizer(url, reqId) {
+  const buf = await b2LoadOrFetch(url, reqId);
+  const tk = JSON.parse(new TextDecoder().decode(buf));
+  const vocab = tk.model?.vocab || {};
+  const merges = tk.model?.merges || [];
+  return {
+    url,
+    downloadBytes: buf.byteLength,
+    type: tk.model?.type || 'unknown',
+    vocabSize: Object.keys(vocab).length,
+    mergeCount: merges.length,
+    addedTokens: (tk.added_tokens || []).map(t => ({ id: t.id, content: t.content, special: t.special })),
+    sampleVocab: Object.keys(vocab).slice(0, 10),
+    preTokenizer: tk.pre_tokenizer?.type || null,
+    decoder: tk.decoder?.type || null,
+  };
+}
+
+async function b2InspectConfig(url, reqId) {
+  const buf = await b2LoadOrFetch(url, reqId);
+  const cfg = JSON.parse(new TextDecoder().decode(buf));
+  return { url, downloadBytes: buf.byteLength, config: cfg };
+}
+
+async function b2ClearCache() {
+  const ok = await caches.delete(B2_CACHE);
+  return { ok };
+}
+
+async function b2CacheStatus() {
+  const cache = await caches.open(B2_CACHE);
+  const keys = await cache.keys();
+  const entries = await Promise.all(keys.map(async (req) => {
+    const resp = await cache.match(req);
+    const len = parseInt(resp.headers.get('content-length') || '0', 10);
+    return { url: req.url, bytes: len };
+  }));
+  return { entries, totalBytes: entries.reduce((a, b) => a + b.bytes, 0) };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// b2 — model load + GPU upload + forward probe (Phase 1, chunk 2)
+// Architecture-agnostic: drives everything from HF config + safetensors names.
+// Should accept any Llama-family model (SmolLM, Qwen2.5, etc.) within VRAM limits.
+// ─────────────────────────────────────────────────────────────────
+
+let b2State = null;  // { cfg, hfCfg, weights: Map<name,{buf,shape,bytes}>, act }
+
+// Map HF config.json schema → our ModelConfig schema
+function b2HFConfigToModelCfg(hf, ctxLenCap = 512) {
+  const arch = hf.architectures?.[0] || 'unknown';
+  if (arch !== 'LlamaForCausalLM' && !arch.toLowerCase().includes('llama')) {
+    console.warn(`[b2] arch ${arch} not officially supported — assuming Llama-family layout`);
+  }
+  return {
+    arch,
+    vocab_size:  hf.vocab_size,
+    d_model:     hf.hidden_size,
+    n_heads:     hf.num_attention_heads,
+    n_kv_heads:  hf.num_key_value_heads || hf.num_attention_heads,  // GQA fallback to MHA
+    n_layers:    hf.num_hidden_layers,
+    ctx_len:     Math.min(hf.max_position_embeddings || ctxLenCap, ctxLenCap),
+    d_ff:        hf.intermediate_size,
+    norm_type:   'rmsnorm',
+    rope:        true,
+    rope_theta:  hf.rope_theta || 10000,
+    rms_eps:     hf.rms_norm_eps || 1e-5,
+    activation:  hf.hidden_act === 'silu' ? 'silu_gated' : 'gelu',
+    tie_word_embeddings: hf.tie_word_embeddings !== false,
+  };
+}
+
+// Create a STORAGE buffer + write data, with 4-byte alignment padding (WebGPU requirement)
+function b2MakeWeightBuffer(device, bytes) {
+  const sz = Math.ceil(bytes.byteLength / 4) * 4;
+  const buf = device.createBuffer({
+    size: sz,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  if (sz === bytes.byteLength) {
+    device.queue.writeBuffer(buf, 0, bytes);
+  } else {
+    const padded = new Uint8Array(sz);
+    padded.set(bytes);
+    device.queue.writeBuffer(buf, 0, padded);
+  }
+  return buf;
+}
+
+// Convert tensor bytes → F32 (kernels currently F32 only; bf16/f16 paths kept for other models)
+function b2WeightToF32Bytes(dtype, bytes) {
+  if (dtype === 'F32') return bytes;
+  if (dtype === 'F16') return new Uint8Array(b2F16ToF32(bytes).buffer);
+  if (dtype === 'BF16') {
+    const f16 = b2Bf16ToF16(bytes);
+    return new Uint8Array(b2F16ToF32(new Uint8Array(f16.buffer)).buffer);
+  }
+  throw new Error(`unsupported tensor dtype: ${dtype}`);
+}
+
+// Allocate activation buffers sized for a given ModelConfig
+function b2AllocActivations(device, cfg) {
+  const T = cfg.ctx_len;
+  const D = cfg.d_model;
+  const D_kv = cfg.n_kv_heads * Math.floor(D / cfg.n_heads);
+  const F = cfg.d_ff;
+  const V = cfg.vocab_size;
+  const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+  const mkA = n => device.createBuffer({ size: Math.max(4, n * 4), usage: SC });
+  return {
+    T, D, D_kv, F, V,
+    x0: mkA(T*D), x1: mkA(T*D), norm: mkA(T*D),
+    Q: mkA(T*D), K: mkA(T*D_kv), Vb: mkA(T*D_kv),
+    attn: mkA(T*D), proj: mkA(T*D),
+    ff_h: mkA(T*F), ff_gate: mkA(T*F), ff_up: mkA(T*F),
+    logits: mkA(T*V),
+    perTokenLoss: mkA(T),
+    zeros: device.createBuffer({ size: Math.max(4, T * D * 4), usage: SC }),  // zero-init by default
+    readback: device.createBuffer({
+      size: 1024,                                               // 256 floats — enough for per-call probes
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    }),
+  };
+}
+
+async function b2LoadModel(modelUrl, configUrl, reqId) {
+  if (gpuCtx === undefined) gpuCtx = await initWebGPU();
+  if (!gpuCtx) throw new Error('WebGPU not available — b2 needs WebGPU');
+
+  if (b2State) await b2UnloadModel();
+
+  // 1. Config
+  const cfgBuf = await b2LoadOrFetch(configUrl, reqId);
+  const hfCfg = JSON.parse(new TextDecoder().decode(cfgBuf));
+  const cfg = b2HFConfigToModelCfg(hfCfg);
+
+  // Sanity: largest tensor must fit in a single storage buffer
+  const limit = gpuCtx.device.limits?.maxStorageBufferBindingSize || (128 * 1024 * 1024);
+  const biggestTensor = Math.max(cfg.vocab_size * cfg.d_model, cfg.d_ff * cfg.d_model) * 4;
+  if (biggestTensor > limit) {
+    throw new Error(`largest tensor ${(biggestTensor/1048576).toFixed(0)} MB exceeds adapter limit ${(limit/1048576).toFixed(0)} MB — try a smaller model or enable F16`);
+  }
+
+  // 2. Safetensors
+  const sfBuf = await b2LoadOrFetch(modelUrl, reqId);
+  const sf = b2ParseSafetensors(sfBuf);
+
+  // 3. Upload all tensors as GPUBuffers
+  post({ type: 'b2:progress', id: reqId, stage: 'uploading', loaded: 0, total: sf.tensorNames.length });
+  const weights = new Map();
+  let totalUploadBytes = 0;
+  const dtypeOrigCount = {};
+  for (let i = 0; i < sf.tensorNames.length; i++) {
+    const name = sf.tensorNames[i];
+    const t = sf.getTensorBytes(name);
+    dtypeOrigCount[t.dtype] = (dtypeOrigCount[t.dtype] || 0) + 1;
+    const f32Bytes = b2WeightToF32Bytes(t.dtype, t.bytes);
+    const buf = b2MakeWeightBuffer(gpuCtx.device, f32Bytes);
+    weights.set(name, { buf, shape: t.shape, bytes: f32Bytes.byteLength });
+    totalUploadBytes += f32Bytes.byteLength;
+    if (i % 25 === 0 || i === sf.tensorNames.length - 1) {
+      post({ type: 'b2:progress', id: reqId, stage: 'uploading', loaded: i + 1, total: sf.tensorNames.length });
+    }
+  }
+
+  // 4. Allocate activation buffers sized for this model
+  const act = b2AllocActivations(gpuCtx.device, cfg);
+
+  // 5. Precompute and upload RoPE cos/sin tables
+  const ropeData = b2BuildRopeTables(cfg);
+  const ropeUsage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+  const ropeCosBuf = gpuCtx.device.createBuffer({ size: ropeData.cos.byteLength, usage: ropeUsage });
+  const ropeSinBuf = gpuCtx.device.createBuffer({ size: ropeData.sin.byteLength, usage: ropeUsage });
+  gpuCtx.device.queue.writeBuffer(ropeCosBuf, 0, ropeData.cos);
+  gpuCtx.device.queue.writeBuffer(ropeSinBuf, 0, ropeData.sin);
+  const rope = { cosBuf: ropeCosBuf, sinBuf: ropeSinBuf, dh: ropeData.dh, halfDh: ropeData.halfDh };
+
+  b2State = { cfg, hfCfg, weights, act, rope };
+
+  return {
+    cfg,
+    tensorCount: weights.size,
+    totalUploadedBytes: totalUploadBytes,
+    originalDtypes: dtypeOrigCount,
+    activationBytes: 4 * (act.T * act.D * 6 + act.T * act.D_kv * 2 + act.T * act.F * 3 + act.T * act.V + act.T),
+    ropeTableBytes: ropeData.cos.byteLength * 2,
+    biggestTensorBytes: biggestTensor,
+    adapterMaxBufferBindingSize: limit,
+  };
+}
+
+async function b2UnloadModel() {
+  if (!b2State) return { ok: true, hadModel: false };
+  for (const w of b2State.weights.values()) w.buf.destroy();
+  for (const k of Object.keys(b2State.act)) {
+    const v = b2State.act[k];
+    if (v && typeof v.destroy === 'function') v.destroy();
+  }
+  if (b2State.rope) {
+    b2State.rope.cosBuf.destroy();
+    b2State.rope.sinBuf.destroy();
+  }
+  b2State = null;
+  return { ok: true, hadModel: true };
+}
+
+// Layer-0 probe: embed → RMSNorm → Q/K/V projections.
+// Reads back first 8 floats of each so we can eyeball whether the GPU pipeline is wired correctly.
+async function b2ForwardLayer0Probe(tokens) {
+  if (!b2State) throw new Error('model not loaded — call b2:load_model first');
+  const { cfg, weights, act } = b2State;
+  const { device, bgl, pl: PL, df, du } = gpuCtx;
+  const T = tokens.length;
+  if (T === 0) throw new Error('tokens array is empty');
+  if (T > cfg.ctx_len) throw new Error(`T=${T} exceeds ctx_len=${cfg.ctx_len}`);
+  const D = cfg.d_model;
+  const D_kv = act.D_kv;
+
+  const tokBuf = device.createBuffer({
+    size: Math.max(4, T * 4),
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    mappedAtCreation: true,
+  });
+  new Uint32Array(tokBuf.getMappedRange()).set(tokens);
+  tokBuf.unmap();
+
+  const w_embed = weights.get('model.embed_tokens.weight').buf;
+  const w_ln1   = weights.get('model.layers.0.input_layernorm.weight').buf;
+  const w_q     = weights.get('model.layers.0.self_attn.q_proj.weight').buf;
+  const w_k     = weights.get('model.layers.0.self_attn.k_proj.weight').buf;
+  const w_v     = weights.get('model.layers.0.self_attn.v_proj.weight').buf;
+
+  const enc = device.createCommandEncoder();
+  const c8  = n => Math.ceil(n / 8);
+  const c64 = n => Math.ceil(n / 64);
+  const go  = (pl, cfgArr, a, b, c, out, u32, dx, dy = 1) =>
+    gpuPass(enc, device, bgl, df, du, pl, cfgArr, a, b, c, out, u32, dx, dy);
+
+  // 1. Embed lookup (reuse v1 embed_add with a zero pos buffer — RoPE handles position later)
+  go(PL.embed_add, [T, D], w_embed, act.zeros, null, act.x0, tokBuf, c64(T * D));
+
+  // 2. RMSNorm with layer 0 input_layernorm
+  go(PL.rms_norm, [T, D], act.x0, w_ln1, null, act.norm, null, T);
+
+  // 3. Q, K, V projections — matmul_bt because Llama weights are stored [out_dim, in_dim]
+  go(PL.matmul_bt, [T, D, D],    act.norm, w_q, null, act.Q,  null, c8(D),    c8(T));
+  go(PL.matmul_bt, [T, D, D_kv], act.norm, w_k, null, act.K,  null, c8(D_kv), c8(T));
+  go(PL.matmul_bt, [T, D, D_kv], act.norm, w_v, null, act.Vb, null, c8(D_kv), c8(T));
+
+  // Probe: copy first 8 floats (32 bytes) of each stage into the readback buffer at offsets
+  enc.copyBufferToBuffer(act.x0,   0, act.readback,   0, 32);   // embed[token0][0:8]
+  enc.copyBufferToBuffer(act.norm, 0, act.readback,  32, 32);   // rmsnorm output
+  enc.copyBufferToBuffer(act.Q,    0, act.readback,  64, 32);   // Q[0][0:8]
+  enc.copyBufferToBuffer(act.K,    0, act.readback,  96, 32);   // K[0][0:8]
+  enc.copyBufferToBuffer(act.Vb,   0, act.readback, 128, 32);   // V[0][0:8]
+
+  device.queue.submit([enc.finish()]);
+  tokBuf.destroy();
+
+  await act.readback.mapAsync(GPUMapMode.READ, 0, 160);
+  const view = new Float32Array(act.readback.getMappedRange(0, 160).slice(0));
+  act.readback.unmap();
+
+  const probe = (start) => {
+    const slice = Array.from(view.subarray(start, start + 8));
+    return {
+      head: slice,
+      finite: slice.every(x => Number.isFinite(x)),
+      nonzero: slice.some(x => x !== 0),
+      absMax: Math.max(...slice.map(Math.abs)),
+    };
+  };
+
+  return {
+    T,
+    dims: { D, D_kv, n_heads: cfg.n_heads, n_kv_heads: cfg.n_kv_heads },
+    embed:   probe(0),
+    rmsnorm: probe(8),
+    Q:       probe(16),
+    K:       probe(24),
+    V:       probe(32),
+  };
+}
+
+async function b2ModelStatus() {
+  if (!b2State) return { loaded: false };
+  return {
+    loaded: true,
+    cfg: b2State.cfg,
+    tensorCount: b2State.weights.size,
+    sampleNames: Array.from(b2State.weights.keys()).slice(0, 8),
+  };
+}
+
+// Precompute RoPE cos/sin tables on CPU. Tables shape: [ctx_len, head_dim/2]
+function b2BuildRopeTables(cfg) {
+  const T  = cfg.ctx_len;
+  const dh = Math.floor(cfg.d_model / cfg.n_heads);
+  const halfDh = dh >> 1;
+  const theta  = cfg.rope_theta || 10000;
+  const cos = new Float32Array(T * halfDh);
+  const sin = new Float32Array(T * halfDh);
+  for (let pos = 0; pos < T; pos++) {
+    for (let i = 0; i < halfDh; i++) {
+      const freq = Math.pow(theta, -(2 * i) / dh);
+      const angle = pos * freq;
+      cos[pos * halfDh + i] = Math.cos(angle);
+      sin[pos * halfDh + i] = Math.sin(angle);
+    }
+  }
+  return { cos, sin, dh, halfDh };
+}
+
+// Full forward pass + cross-entropy on next-token-prediction.
+// Predicts tokens[t+1] from tokens[0..t] for t in 0..T-2 (T-1 predictions).
+// Returns mean cross-entropy loss.
+async function b2ForwardLoss(tokens) {
+  if (!b2State) throw new Error('model not loaded — call b2:load_model first');
+  const { cfg, weights, act, rope } = b2State;
+  const { device, bgl, pl: PL, df, du } = gpuCtx;
+
+  const T = tokens.length;
+  if (T < 2) throw new Error('need at least 2 tokens for next-token loss');
+  if (T > cfg.ctx_len) throw new Error(`T=${T} exceeds ctx_len=${cfg.ctx_len}`);
+
+  const D    = cfg.d_model;
+  const D_kv = act.D_kv;
+  const H    = cfg.n_heads;
+  const H_kv = cfg.n_kv_heads;
+  const F    = cfg.d_ff;
+  const V    = cfg.vocab_size;
+  const L    = cfg.n_layers;
+  const dh   = rope.dh;
+
+  // Targets: tokens shifted by 1. Last position gets a dummy target (loss for that position discarded).
+  const targets = new Uint32Array(T);
+  for (let i = 0; i < T - 1; i++) targets[i] = tokens[i + 1];
+  targets[T - 1] = 0;  // unused — we average loss over T-1
+
+  const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+  const mkU32 = arr => {
+    const b = device.createBuffer({ size: Math.max(4, arr.length * 4), usage: SC, mappedAtCreation: true });
+    new Uint32Array(b.getMappedRange()).set(arr);
+    b.unmap();
+    return b;
+  };
+  const tokBuf = mkU32(tokens);
+  const tgtBuf = mkU32(targets);
+
+  const enc = device.createCommandEncoder();
+  const c8  = n => Math.ceil(n / 8);
+  const c64 = n => Math.ceil(n / 64);
+  const go  = (pl, cfgArr, a, b, c, out, u32, dx, dy = 1) =>
+    gpuPass(enc, device, bgl, df, du, pl, cfgArr, a, b, c, out, u32, dx, dy);
+
+  let curX = act.x0, tmpX = act.x1;
+
+  // Embed lookup (zero pos buffer — RoPE provides positional info inside attention)
+  go(PL.embed_add, [T, D], weights.get('model.embed_tokens.weight').buf,
+     act.zeros, null, curX, tokBuf, c64(T * D));
+
+  for (let l = 0; l < L; l++) {
+    const W = (k) => weights.get(`model.layers.${l}.${k}`).buf;
+
+    // ── Attention sub-layer ─────────────────────────────────────────
+    go(PL.rms_norm,   [T, D],            curX,     W('input_layernorm.weight'),       null, act.norm, null, T);
+    go(PL.matmul_bt,  [T, D, D],         act.norm, W('self_attn.q_proj.weight'),      null, act.Q,   null, c8(D),    c8(T));
+    go(PL.matmul_bt,  [T, D, D_kv],      act.norm, W('self_attn.k_proj.weight'),      null, act.K,   null, c8(D_kv), c8(T));
+    go(PL.matmul_bt,  [T, D, D_kv],      act.norm, W('self_attn.v_proj.weight'),      null, act.Vb,  null, c8(D_kv), c8(T));
+
+    // RoPE in-place on Q (H heads) and K (H_kv heads). Tables shared.
+    go(PL.rope, [T, H,    dh], rope.cosBuf, rope.sinBuf, null, act.Q, null, H,    T);
+    go(PL.rope, [T, H_kv, dh], rope.cosBuf, rope.sinBuf, null, act.K, null, H_kv, T);
+
+    go(PL.causal_attn, [T, D, H, H_kv], act.Q, act.K, act.Vb, act.attn, null, H, T);
+    go(PL.matmul_bt,   [T, D, D],       act.attn, W('self_attn.o_proj.weight'), null, act.proj, null, c8(D), c8(T));
+    go(PL.residual_add,[T * D],         curX, act.proj, null, tmpX, null, c64(T * D));
+    [curX, tmpX] = [tmpX, curX];
+
+    // ── FFN sub-layer (SwiGLU) ──────────────────────────────────────
+    go(PL.rms_norm,   [T, D],     curX,        W('post_attention_layernorm.weight'), null, act.norm,    null, T);
+    go(PL.matmul_bt,  [T, D, F],  act.norm,    W('mlp.gate_proj.weight'),            null, act.ff_gate, null, c8(F), c8(T));
+    go(PL.matmul_bt,  [T, D, F],  act.norm,    W('mlp.up_proj.weight'),              null, act.ff_up,   null, c8(F), c8(T));
+    go(PL.silu_mul,   [T * F],    act.ff_gate, act.ff_up,                            null, act.ff_h,    null, c64(T * F));
+    go(PL.matmul_bt,  [T, F, D],  act.ff_h,    W('mlp.down_proj.weight'),            null, act.proj,    null, c8(D), c8(T));
+    go(PL.residual_add,[T * D],   curX, act.proj, null, tmpX, null, c64(T * D));
+    [curX, tmpX] = [tmpX, curX];
+  }
+
+  // Final RMSNorm + tied logits (lm_head = embed^T) + cross-entropy
+  go(PL.rms_norm,    [T, D],     curX,       weights.get('model.norm.weight').buf, null, act.norm,         null, T);
+  go(PL.matmul_bt,   [T, D, V],  act.norm,   weights.get('model.embed_tokens.weight').buf, null, act.logits, null, c8(V), c8(T));
+  go(PL.cross_entropy,[T, V],    act.logits, null, null, act.perTokenLoss, tgtBuf, T);
+
+  // Read back per-token losses (T floats = 4*T bytes)
+  // We need a separate larger readback buffer here since act.readback is only 1KB.
+  const lossStage = device.createBuffer({
+    size: Math.max(16, T * 4),
+    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+  });
+  enc.copyBufferToBuffer(act.perTokenLoss, 0, lossStage, 0, T * 4);
+
+  device.queue.submit([enc.finish()]);
+  tokBuf.destroy();
+  tgtBuf.destroy();
+
+  await lossStage.mapAsync(GPUMapMode.READ, 0, T * 4);
+  const losses = Array.from(new Float32Array(lossStage.getMappedRange(0, T * 4).slice(0)));
+  lossStage.unmap();
+  lossStage.destroy();
+
+  // Average over T-1 valid positions (drop loss[T-1] — that position has no real target)
+  let sum = 0;
+  for (let i = 0; i < T - 1; i++) sum += losses[i];
+  const meanLoss = sum / (T - 1);
+
+  return {
+    T,
+    mean_loss: meanLoss,
+    perTokenLoss: losses,
+    perplexity: Math.exp(meanLoss),
+  };
+}
+
+// Forward pass that ALSO returns intermediate-layer probes for verification against numpy reference.
+// Slower (extra readbacks) — use only for debugging.
+async function b2ForwardLossWithProbes(tokens) {
+  if (!b2State) throw new Error('model not loaded');
+  const { cfg, weights, act, rope } = b2State;
+  const { device, bgl, pl: PL, df, du } = gpuCtx;
+
+  const T = tokens.length;
+  const D = cfg.d_model, D_kv = act.D_kv;
+  const H = cfg.n_heads, H_kv = cfg.n_kv_heads;
+  const F = cfg.d_ff, V = cfg.vocab_size;
+  const L = cfg.n_layers, dh = rope.dh;
+
+  const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+  const tokBuf = device.createBuffer({ size: Math.max(4, T * 4), usage: SC, mappedAtCreation: true });
+  new Uint32Array(tokBuf.getMappedRange()).set(tokens); tokBuf.unmap();
+  const targets = new Uint32Array(T);
+  for (let i = 0; i < T - 1; i++) targets[i] = tokens[i + 1];
+  const tgtBuf = device.createBuffer({ size: Math.max(4, T * 4), usage: SC, mappedAtCreation: true });
+  new Uint32Array(tgtBuf.getMappedRange()).set(targets); tgtBuf.unmap();
+
+  const enc = device.createCommandEncoder();
+  const c8  = n => Math.ceil(n / 8);
+  const c64 = n => Math.ceil(n / 64);
+  const go  = (pl, cfgArr, a, b, c, out, u32, dx, dy = 1) =>
+    gpuPass(enc, device, bgl, df, du, pl, cfgArr, a, b, c, out, u32, dx, dy);
+
+  let curX = act.x0, tmpX = act.x1;
+  go(PL.embed_add, [T, D], weights.get('model.embed_tokens.weight').buf, act.zeros, null, curX, tokBuf, c64(T * D));
+
+  // Capture buffers for layer 0 probes (we copy these to readback at the end)
+  let probeAfterEmbed   = curX;     // alias only — readback before next overwrite is at the very start
+  let probeQAfterRope   = act.Q;
+  let probeKAfterRope   = act.K;
+  let probeAttnOut      = act.attn;
+
+  for (let l = 0; l < L; l++) {
+    const W = (k) => weights.get(`model.layers.${l}.${k}`).buf;
+    go(PL.rms_norm,  [T, D],        curX,     W('input_layernorm.weight'), null, act.norm, null, T);
+    go(PL.matmul_bt, [T, D, D],     act.norm, W('self_attn.q_proj.weight'),null, act.Q,   null, c8(D),    c8(T));
+    go(PL.matmul_bt, [T, D, D_kv],  act.norm, W('self_attn.k_proj.weight'),null, act.K,   null, c8(D_kv), c8(T));
+    go(PL.matmul_bt, [T, D, D_kv],  act.norm, W('self_attn.v_proj.weight'),null, act.Vb,  null, c8(D_kv), c8(T));
+    go(PL.rope, [T, H,    dh], rope.cosBuf, rope.sinBuf, null, act.Q, null, H,    T);
+    go(PL.rope, [T, H_kv, dh], rope.cosBuf, rope.sinBuf, null, act.K, null, H_kv, T);
+    go(PL.causal_attn, [T, D, H, H_kv], act.Q, act.K, act.Vb, act.attn, null, H, T);
+    go(PL.matmul_bt,   [T, D, D],       act.attn, W('self_attn.o_proj.weight'), null, act.proj, null, c8(D), c8(T));
+    go(PL.residual_add,[T * D],         curX, act.proj, null, tmpX, null, c64(T * D));
+    [curX, tmpX] = [tmpX, curX];
+    go(PL.rms_norm,  [T, D],     curX,     W('post_attention_layernorm.weight'), null, act.norm, null, T);
+    go(PL.matmul_bt, [T, D, F],  act.norm, W('mlp.gate_proj.weight'), null, act.ff_gate, null, c8(F), c8(T));
+    go(PL.matmul_bt, [T, D, F],  act.norm, W('mlp.up_proj.weight'),   null, act.ff_up,   null, c8(F), c8(T));
+    go(PL.silu_mul,  [T * F],    act.ff_gate, act.ff_up, null, act.ff_h, null, c64(T * F));
+    go(PL.matmul_bt, [T, F, D],  act.ff_h, W('mlp.down_proj.weight'), null, act.proj, null, c8(D), c8(T));
+    go(PL.residual_add,[T * D],  curX, act.proj, null, tmpX, null, c64(T * D));
+    [curX, tmpX] = [tmpX, curX];
+  }
+  go(PL.rms_norm,    [T, D],    curX,       weights.get('model.norm.weight').buf, null, act.norm, null, T);
+  go(PL.matmul_bt,   [T, D, V], act.norm,   weights.get('model.embed_tokens.weight').buf, null, act.logits, null, c8(V), c8(T));
+  go(PL.cross_entropy,[T, V],   act.logits, null, null, act.perTokenLoss, tgtBuf, T);
+
+  const lossStage = device.createBuffer({ size: Math.max(16, T * 4), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  enc.copyBufferToBuffer(act.perTokenLoss, 0, lossStage, 0, T * 4);
+  // Probe: first 8 floats of finalNorm output and first 8 logits for token 0
+  enc.copyBufferToBuffer(act.norm,   0, act.readback,  0, 32);   // finalNorm[0][0:8]
+  enc.copyBufferToBuffer(act.logits, 0, act.readback, 32, 32);   // logits[0][0:8]
+  device.queue.submit([enc.finish()]);
+  tokBuf.destroy(); tgtBuf.destroy();
+
+  await Promise.all([
+    lossStage.mapAsync(GPUMapMode.READ, 0, T * 4),
+    act.readback.mapAsync(GPUMapMode.READ, 0, 64),
+  ]);
+  const losses = Array.from(new Float32Array(lossStage.getMappedRange(0, T * 4).slice(0)));
+  const probeView = new Float32Array(act.readback.getMappedRange(0, 64).slice(0));
+  lossStage.unmap(); lossStage.destroy();
+  act.readback.unmap();
+
+  let sum = 0;
+  for (let i = 0; i < T - 1; i++) sum += losses[i];
+  const meanLoss = sum / (T - 1);
+
+  return {
+    T,
+    mean_loss: meanLoss,
+    perplexity: Math.exp(meanLoss),
+    perTokenLoss: losses,
+    finalNorm_token0_head: Array.from(probeView.subarray(0, 8)),
+    logits_token0_head: Array.from(probeView.subarray(8, 16)),
+  };
+}
+
+// ============================================================
 // WORKER MESSAGE ENTRY POINT
 // ============================================================
 
@@ -1937,6 +2718,26 @@ if (typeof self !== 'undefined') {
       else if (m.type === 'train_bpe') {
         const bpe = trainBPE(m.corpus, m.targetVocab || 2000);
         post({ type: 'bpe_ready', vocab_size: bpe.vocab.length });
+      }
+      else if (m.type && m.type.startsWith('b2:')) {
+        try {
+          let data;
+          if      (m.type === 'b2:inspect_model')     data = await b2InspectModel(m.url, m.id);
+          else if (m.type === 'b2:inspect_tokenizer') data = await b2InspectTokenizer(m.url, m.id);
+          else if (m.type === 'b2:inspect_config')    data = await b2InspectConfig(m.url, m.id);
+          else if (m.type === 'b2:clear_cache')       data = await b2ClearCache();
+          else if (m.type === 'b2:cache_status')      data = await b2CacheStatus();
+          else if (m.type === 'b2:load_model')        data = await b2LoadModel(m.modelUrl, m.configUrl, m.id);
+          else if (m.type === 'b2:unload_model')      data = await b2UnloadModel();
+          else if (m.type === 'b2:forward_layer0')    data = await b2ForwardLayer0Probe(m.tokens);
+          else if (m.type === 'b2:forward_loss')      data = await b2ForwardLoss(m.tokens);
+          else if (m.type === 'b2:forward_loss_probe') data = await b2ForwardLossWithProbes(m.tokens);
+          else if (m.type === 'b2:model_status')      data = await b2ModelStatus();
+          else throw new Error(`unknown b2 message: ${m.type}`);
+          post({ type: 'b2:result', id: m.id, ok: true, data });
+        } catch (err) {
+          post({ type: 'b2:result', id: m.id, ok: false, error: err.message });
+        }
       }
     } catch (err) {
       self.postMessage({ type: 'error', stage: e.data?.stage, message: err.message });
@@ -2058,8 +2859,77 @@ function onWorkerMessage(e) {
       showBanner('Error: ' + m.message, 'error');
       if (m.stage) { S.stages[m.stage].status = 'error'; updateStageUI(m.stage); }
       break;
+
+    case 'b2:result':    window.tapasya?.b2?._onResult?.(m);    break;
+    case 'b2:progress':  window.tapasya?.b2?._onProgress?.(m);  break;
   }
 }
+
+// ---- b2 dev API (Phase 1) ----
+// Exposed on window.tapasya.b2 for dev-console testing of HF fetch + safetensors parse.
+// Call from console:
+//   await tapasya.b2.inspectConfig()       // ~1KB
+//   await tapasya.b2.inspectTokenizer()    // ~2MB
+//   await tapasya.b2.inspectModel()        // ~270MB (streams with progress logs)
+//   await tapasya.b2.cacheStatus()
+//   await tapasya.b2.clearCache()
+window.tapasya = window.tapasya || {};
+window.tapasya.b2 = (() => {
+  const HF = 'https://huggingface.co/HuggingFaceTB/SmolLM-135M/resolve/main';
+  const pending = new Map();
+  let seq = 0;
+  function send(type, payload = {}) {
+    return new Promise((resolve, reject) => {
+      if (!S.worker) { spawnWorker(); }
+      const id = ++seq;
+      pending.set(id, { resolve, reject, startedAt: performance.now() });
+      S.worker.postMessage({ type, id, ...payload });
+    });
+  }
+  function _onResult(msg) {
+    const p = pending.get(msg.id);
+    if (!p) return;
+    pending.delete(msg.id);
+    const elapsed = ((performance.now() - p.startedAt) / 1000).toFixed(2);
+    if (msg.ok) {
+      console.log(`[b2] done in ${elapsed}s`);
+      p.resolve(msg.data);
+    } else {
+      p.reject(new Error(msg.error));
+    }
+  }
+  function _onProgress(msg) {
+    const file = (msg.url || '').split('/').pop();
+    if (msg.stage === 'cache_hit') {
+      console.log(`[b2] ${file} — cache hit`);
+    } else if (msg.stage === 'cached') {
+      console.log(`[b2] ${file} — stored in Cache Storage (${(msg.loaded/1048576).toFixed(1)} MB)`);
+    } else if (msg.stage === 'cache_skipped') {
+      console.warn(`[b2] ${file} — cache write failed (${msg.reason}); continuing without persistence`);
+    } else if (msg.stage === 'downloading' && msg.total > 0) {
+      const pct = ((msg.loaded / msg.total) * 100).toFixed(1);
+      console.log(`[b2] ${file} — ${(msg.loaded/1048576).toFixed(1)} / ${(msg.total/1048576).toFixed(1)} MB (${pct}%)`);
+    } else if (msg.stage === 'uploading') {
+      const pct = ((msg.loaded / msg.total) * 100).toFixed(0);
+      console.log(`[b2] uploading tensors → GPU: ${msg.loaded} / ${msg.total} (${pct}%)`);
+    }
+  }
+  return {
+    inspectModel:     (url = `${HF}/model.safetensors`) => send('b2:inspect_model',     { url }),
+    inspectTokenizer: (url = `${HF}/tokenizer.json`)    => send('b2:inspect_tokenizer', { url }),
+    inspectConfig:    (url = `${HF}/config.json`)       => send('b2:inspect_config',    { url }),
+    cacheStatus:      ()                                 => send('b2:cache_status',      {}),
+    clearCache:       ()                                 => send('b2:clear_cache',       {}),
+    loadModel:        (modelUrl = `${HF}/model.safetensors`, configUrl = `${HF}/config.json`) =>
+                       send('b2:load_model',     { modelUrl, configUrl }),
+    unloadModel:      ()             => send('b2:unload_model', {}),
+    forwardLayer0:    (tokens = [0]) => send('b2:forward_layer0', { tokens }),
+    forwardLoss:      (tokens)       => send('b2:forward_loss', { tokens }),
+    forwardLossProbe: (tokens)       => send('b2:forward_loss_probe', { tokens }),
+    modelStatus:      ()             => send('b2:model_status', {}),
+    _onResult, _onProgress,
+  };
+})();
 
 // ---- Corpus ----
 function lockCorpus() {
