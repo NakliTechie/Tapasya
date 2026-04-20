@@ -2252,6 +2252,7 @@ function b2BuildByteEncoder() {
 const B2_PRETOKEN_RE = /'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+/gu;
 
 let b2Tokenizer = null;  // singleton — one tokenizer loaded at a time
+let b2DocsState = null;  // { docs, trainChunks, valChunks, seqLen, totalTokens, totalChunks, corpusHash }
 
 class B2Tokenizer {
   constructor(json) {
@@ -2399,6 +2400,145 @@ async function b2TokDecode(ids, opts = {}) {
   const t0 = performance.now();
   const text = b2Tokenizer.decode(ids, opts.skipSpecial === true);
   return { text, elapsed_ms: performance.now() - t0 };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// b2 document pipeline — load text → tokenise → chunk → train/val split
+// ─────────────────────────────────────────────────────────────────
+
+// docs: [{name, text}, ...]
+// opts: { seq_len=512, val_frac=0.1 }
+async function b2LoadDocs(docs, opts = {}) {
+  if (!b2Tokenizer) throw new Error('tokenizer not loaded — call b2:load_tokenizer first');
+
+  const seqLen  = opts.seq_len  ?? 512;
+  const valFrac = opts.val_frac ?? 0.1;
+
+  const sep = b2Tokenizer.encode('\n\n');
+  const docStats   = [];
+  const allTokens  = [];
+
+  for (const doc of docs) {
+    if (allTokens.length > 0) for (const t of sep) allTokens.push(t);
+    const t0   = performance.now();
+    const toks = b2Tokenizer.encode(doc.text);
+    for (const t of toks) allTokens.push(t);
+    docStats.push({ name: doc.name, tokenCount: toks.length, elapsed_ms: performance.now() - t0 });
+  }
+
+  // Non-overlapping chunks of exactly seqLen tokens (drop trailing partial chunk)
+  const chunks = [];
+  for (let i = 0; i + seqLen <= allTokens.length; i += seqLen)
+    chunks.push(allTokens.slice(i, i + seqLen));
+
+  if (chunks.length === 0) throw new Error(
+    `corpus too short — need ≥${seqLen} tokens, got ${allTokens.length}. Paste more text or reduce seq_len.`
+  );
+
+  // Deterministic shuffle before splitting (fixed seed so checkpoints stay valid)
+  const shuffled = [...chunks];
+  const rng = b2MakeSampleRng(0xDECAFB2);
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+
+  const nVal      = Math.floor(shuffled.length * valFrac);
+  const valChunks = shuffled.slice(0, nVal);
+  const trainChunks = shuffled.slice(nVal);
+
+  // djb2 hash of all tokens — used to validate checkpoint compatibility
+  let hash = 5381;
+  for (const t of allTokens) hash = (((hash << 5) + hash) ^ t) >>> 0;
+
+  b2DocsState = {
+    docs: docStats, trainChunks, valChunks,
+    seqLen, totalTokens: allTokens.length, totalChunks: chunks.length, corpusHash: hash,
+  };
+
+  return {
+    docs: docStats,
+    totalTokens: allTokens.length,
+    totalChunks: chunks.length,
+    trainChunks: trainChunks.length,
+    valChunks: valChunks.length,
+    seqLen,
+    corpusHash: hash,
+  };
+}
+
+function b2DocsStatus() {
+  if (!b2DocsState) return { loaded: false };
+  const { docs, trainChunks, valChunks, seqLen, totalTokens, totalChunks, corpusHash } = b2DocsState;
+  return {
+    loaded: true,
+    docs: docs.map(d => ({ name: d.name, tokenCount: d.tokenCount })),
+    totalTokens, totalChunks,
+    trainChunks: trainChunks.length,
+    valChunks: valChunks.length,
+    seqLen, corpusHash,
+  };
+}
+
+function b2UnloadDocs() {
+  b2DocsState = null;
+  return { ok: true };
+}
+
+// Returns one chunk from the train or val split, cycling by step index.
+function b2SampleChunk(split, step) {
+  if (!b2DocsState) throw new Error('no docs loaded');
+  const chunks = split === 'val' ? b2DocsState.valChunks : b2DocsState.trainChunks;
+  if (chunks.length === 0) throw new Error(`${split} split is empty`);
+  return chunks[step % chunks.length];
+}
+
+// EGGROLL training that cycles through document chunks — one chunk per step.
+async function b2EggrollTrainDocs(opts = {}) {
+  if (!b2DocsState) throw new Error('no docs loaded — call b2:load_docs first');
+  if (!b2State?.lora) throw new Error('LoRA not initialized');
+
+  const { trainChunks, valChunks } = b2DocsState;
+  if (trainChunks.length === 0) throw new Error('no training chunks');
+
+  const steps     = opts.steps     ?? 100;
+  const startStep = opts.startStep ?? 0;
+  const reqId     = opts._reqId;
+  const history   = [];
+
+  let initial_loss = null;
+  if (opts.measureInitial !== false) {
+    const r = await b2ForwardLoss(trainChunks[0]);
+    initial_loss = r.mean_loss;
+  }
+
+  const t0 = performance.now();
+  for (let s = 0; s < steps; s++) {
+    const stepIdx = startStep + s;
+    const chunk = trainChunks[stepIdx % trainChunks.length];
+    const r = await b2EggrollStep(chunk, { ...opts, step: stepIdx });
+    history.push({ step: stepIdx, mean_pop_loss: r.mean_loss, updated_loss: r.updated_loss });
+    post({ type: 'b2:training_progress', id: reqId,
+           step: stepIdx + 1, total: steps,
+           mean_pop_loss: r.mean_loss, updated_loss: r.updated_loss,
+           elapsed_ms: performance.now() - t0 });
+  }
+
+  let val_loss = null;
+  if (valChunks.length > 0) {
+    const r = await b2ForwardLoss(valChunks[0]);
+    val_loss = r.mean_loss;
+  }
+
+  return {
+    initial_loss,
+    final_loss: history[history.length - 1]?.updated_loss,
+    val_loss,
+    delta: (history[history.length - 1]?.updated_loss ?? 0) - (initial_loss ?? 0),
+    steps: history.length,
+    history,
+    elapsed_ms: performance.now() - t0,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -3491,6 +3631,11 @@ if (typeof self !== 'undefined') {
           else if (m.type === 'b2:tok_encode')        data = await b2TokEncode(m.text);
           else if (m.type === 'b2:tok_decode')        data = await b2TokDecode(m.ids, m.opts || {});
           else if (m.type === 'b2:generate')          data = await b2Generate(m.prompt, { ...(m.opts || {}), _reqId: m.id });
+          else if (m.type === 'b2:load_docs')         data = await b2LoadDocs(m.docs, m.opts || {});
+          else if (m.type === 'b2:docs_status')       data = b2DocsStatus();
+          else if (m.type === 'b2:unload_docs')       data = b2UnloadDocs();
+          else if (m.type === 'b2:sample_chunk')      data = b2SampleChunk(m.split || 'train', m.step || 0);
+          else if (m.type === 'b2:eggroll_train_docs') data = await b2EggrollTrainDocs({ ...(m.opts || {}), _reqId: m.id });
           else throw new Error(`unknown b2 message: ${m.type}`);
           post({ type: 'b2:result', id: m.id, ok: true, data });
         } catch (err) {
@@ -3711,6 +3856,21 @@ window.tapasya.b2 = (() => {
     encode:           (text)         => send('b2:tok_encode', { text }),
     decode:           (ids, opts = {}) => send('b2:tok_decode', { ids, opts }),
     generate:         (prompt, opts = {}) => send('b2:generate', { prompt, opts }),
+    loadDocs: async (filesOrDocs, opts = {}) => {
+      const docs = [];
+      for (const f of filesOrDocs) {
+        if (typeof File !== 'undefined' && f instanceof File) {
+          docs.push({ name: f.name, text: await f.text() });
+        } else {
+          docs.push(f);
+        }
+      }
+      return send('b2:load_docs', { docs, opts });
+    },
+    docsStatus:       ()                      => send('b2:docs_status', {}),
+    unloadDocs:       ()                      => send('b2:unload_docs', {}),
+    sampleChunk:      (split = 'train', step = 0) => send('b2:sample_chunk', { split, step }),
+    eggrollTrainDocs: (opts = {})             => send('b2:eggroll_train_docs', { opts }),
     _onResult, _onProgress, _onTrainingProgress, _onGenerationProgress,
   };
 })();
