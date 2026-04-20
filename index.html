@@ -3316,6 +3316,71 @@ async function b2ResetAdapters() {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// LoRA safetensors export (chunk 1.9)
+// ─────────────────────────────────────────────────────────────────
+
+// Build a safetensors binary from an array of { name, data: Float32Array, shape: number[] }.
+function b2BuildSafetensors(tensors, metadata = {}) {
+  let byteOffset = 0;
+  const header = { __metadata__: metadata };
+  for (const t of tensors) {
+    header[t.name] = { dtype: 'F32', shape: t.shape, data_offsets: [byteOffset, byteOffset + t.data.byteLength] };
+    byteOffset += t.data.byteLength;
+  }
+
+  // Pad header JSON to 8-byte boundary (safetensors convention)
+  let json = JSON.stringify(header);
+  const padLen = (8 - json.length % 8) % 8;
+  if (padLen) json += ' '.repeat(padLen);
+  const jsonBytes = new TextEncoder().encode(json);
+
+  const out = new ArrayBuffer(8 + jsonBytes.length + byteOffset);
+  const dv  = new DataView(out);
+  dv.setBigUint64(0, BigInt(jsonBytes.length), true);           // header length, u64 LE
+  new Uint8Array(out, 8).set(jsonBytes);                        // header JSON
+
+  let pos = 8 + jsonBytes.length;
+  for (const t of tensors) {
+    new Uint8Array(out, pos).set(new Uint8Array(t.data.buffer, t.data.byteOffset, t.data.byteLength));
+    pos += t.data.byteLength;
+  }
+  return out;
+}
+
+// Export all trained LoRA adapters as a PEFT-compatible safetensors binary.
+// Returns { buffer: ArrayBuffer, filename, bytes, tensorCount }.
+// Uses CPU-side A_cpu/B_cpu arrays (always in sync after EGGROLL steps).
+function b2ExportLoRA(opts = {}) {
+  if (!b2State?.lora) throw new Error('LoRA not initialized');
+  const lora    = b2State.lora;
+  const hfModel = b2State.hfCfg?._name_or_path || 'HuggingFaceTB/SmolLM-135M';
+
+  // Map our target names to the HF module path they live under
+  const peftPath = t => (['q_proj', 'k_proj', 'v_proj', 'o_proj'].includes(t) ? `self_attn.${t}` : `mlp.${t}`);
+
+  const tensors = [];
+  for (const [key, ad] of lora.adapters) {
+    const [, layer, target] = key.match(/^layers\.(\d+)\.(.+)$/);
+    const base = `base_model.model.layers.${layer}.${peftPath(target)}`;
+    tensors.push({ name: `${base}.lora_A.weight`, data: ad.A_cpu, shape: ad.Ashape });
+    tensors.push({ name: `${base}.lora_B.weight`, data: ad.B_cpu, shape: ad.Bshape });
+  }
+
+  const metadata = {
+    format:          'tapasya-lora',
+    base_model:       hfModel,
+    rank:             String(lora.rank),
+    alpha:            String(lora.alpha),
+    targets:          lora.targets.join(','),
+    tapasya_version: 'b2',
+  };
+
+  const buffer   = b2BuildSafetensors(tensors, metadata);
+  const filename = `tapasya-lora-r${lora.rank}-${lora.targets.join('+')}.safetensors`;
+  return { buffer, filename, bytes: buffer.byteLength, tensorCount: tensors.length };
+}
+
+// ─────────────────────────────────────────────────────────────────
 // Adapted EGGROLL — perturb only LoRA adapters, antithetic pairs, z-score fitness
 // ─────────────────────────────────────────────────────────────────
 
@@ -3636,6 +3701,7 @@ if (typeof self !== 'undefined') {
           else if (m.type === 'b2:unload_docs')       data = b2UnloadDocs();
           else if (m.type === 'b2:sample_chunk')      data = b2SampleChunk(m.split || 'train', m.step || 0);
           else if (m.type === 'b2:eggroll_train_docs') data = await b2EggrollTrainDocs({ ...(m.opts || {}), _reqId: m.id });
+          else if (m.type === 'b2:export_lora')       data = b2ExportLoRA(m.opts || {});
           else throw new Error(`unknown b2 message: ${m.type}`);
           post({ type: 'b2:result', id: m.id, ok: true, data });
         } catch (err) {
@@ -3871,6 +3937,24 @@ window.tapasya.b2 = (() => {
     unloadDocs:       ()                      => send('b2:unload_docs', {}),
     sampleChunk:      (split = 'train', step = 0) => send('b2:sample_chunk', { split, step }),
     eggrollTrainDocs: (opts = {})             => send('b2:eggroll_train_docs', { opts }),
+    exportLoRA: async (opts = {}) => {
+      const result = await send('b2:export_lora', { opts });
+      const blob = new Blob([result.buffer], { type: 'application/octet-stream' });
+      try {
+        const fh = await showSaveFilePicker({
+          suggestedName: result.filename,
+          types: [{ description: 'Safetensors LoRA adapter', accept: { 'application/octet-stream': ['.safetensors'] } }],
+        });
+        const w = await fh.createWritable();
+        await w.write(blob);
+        await w.close();
+      } catch {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = result.filename; a.click();
+        URL.revokeObjectURL(url);
+      }
+      return { filename: result.filename, bytes: result.bytes, tensorCount: result.tensorCount };
+    },
     _onResult, _onProgress, _onTrainingProgress, _onGenerationProgress,
   };
 })();
