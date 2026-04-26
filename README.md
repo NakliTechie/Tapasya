@@ -44,4 +44,10 @@ For WebGPU acceleration, use Chrome or Edge on a machine with a GPU. Falls back 
 - **OPFS** — checkpoint save/restore so training survives a page reload
 - Zero external dependencies. Four files (`index.html`, `main.js`, `worker.js`, `shaders.wgsl`).
 
+## Palette
+
+Coloured with **`india_west-10 · सह्याद्री रात्री SAHYADRI NIGHT`** — Shivaji's forts at night, 350 fortresses, the Maratha standard in torchlight. A long blue-black night with saffron ink and torchfire-orange brand. Tapasya is patience-as-stronghold; the palette gives that night its colours.
+
+Palette pulled from [**Rangrez**](https://github.com/NakliTechie/rangrez), the global colour-palette library that backs all NakliTechie projects.
+
 Part of the [NakliTechie](https://naklitechie.github.io/) browser-native series.

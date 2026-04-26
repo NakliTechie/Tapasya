@@ -12,21 +12,22 @@
 /* ---- Reset + tokens ---- */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Rangrez · india_west-10 · सह्याद्री रात्री SAHYADRI NIGHT — Shivaji's forts at night, 350 fortresses, Maratha standard in torchlight */
 :root {
-  --bg:       #0d0d0d;
-  --bg1:      #141414;
-  --bg2:      #1c1c1c;
-  --bg3:      #242424;
-  --border:   #2e2e2e;
-  --border2:  #3a3a3a;
-  --text:     #e8e8e8;
-  --text2:    #999;
-  --text3:    #666;
-  --accent:   #4e9af1;
-  --accent2:  #f1a84e;
-  --ok:       #4ec94e;
-  --warn:     #f1c94e;
-  --err:      #f14e4e;
+  --bg:       #08101a;       /* BODY */
+  --bg1:      #0e1822;
+  --bg2:      #141c28;       /* PANEL */
+  --bg3:      #1a222e;       /* ROW */
+  --border:   #2a3340;
+  --border2:  #3a4658;
+  --text:     #f0c870;       /* INK — saffron */
+  --text2:    #b8985a;
+  --text3:    #6a583a;
+  --accent:   #4a6a8a;       /* ACT — fort-blue */
+  --accent2:  #e8542a;       /* BRAND — torchfire */
+  --ok:       #6a9a3a;
+  --warn:     #d8a868;
+  --err:      #e8542a;
   --font:     -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --mono:     'Cascadia Mono', 'Fira Code', 'Menlo', monospace;
 }
@@ -187,13 +188,13 @@ html, body {
   font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
 }
 .badge-idle      { background: var(--bg3); color: var(--text3); }
-.badge-init      { background: #1a2a3a; color: var(--accent); }
-.badge-ready     { background: #1a2a3a; color: var(--accent); }
-.badge-running   { background: #1a3a1a; color: var(--ok); }
-.badge-pausing   { background: #3a3a1a; color: var(--warn); }
-.badge-paused    { background: #3a2a1a; color: var(--accent2); }
-.badge-done      { background: #1a3a1a; color: var(--ok); }
-.badge-error     { background: #3a1a1a; color: var(--err); }
+.badge-init      { background: #1f2c3e; color: var(--accent); }
+.badge-ready     { background: #1f2c3e; color: var(--accent); }
+.badge-running   { background: #1f2e18; color: var(--ok); }
+.badge-pausing   { background: #2e2818; color: var(--warn); }
+.badge-paused    { background: #2e1c12; color: var(--accent2); }
+.badge-done      { background: #1f2e18; color: var(--ok); }
+.badge-error     { background: #2e1414; color: var(--err); }
 .badge-resetting { background: var(--bg3); color: var(--text3); }
 
 /* Teaching copy (guided mode only) */
@@ -231,10 +232,10 @@ html, body {
   transition: border-color 0.12s, background 0.12s;
 }
 .btn:disabled { opacity: 0.35; cursor: default; }
-.btn-start    { background: #1a3a1a; color: var(--ok);    border-color: #2e5e2e; }
-.btn-start:hover:not(:disabled)    { background: #224a22; border-color: var(--ok); }
-.btn-pause    { background: #3a2a1a; color: var(--accent2); border-color: #5e4e2e; }
-.btn-pause:hover:not(:disabled)    { background: #4a3a22; border-color: var(--accent2); }
+.btn-start    { background: #1f2e18; color: var(--ok);    border-color: #2a4818; }
+.btn-start:hover:not(:disabled)    { background: #2c3e1e; border-color: var(--ok); }
+.btn-pause    { background: #2e1c12; color: var(--accent2); border-color: #4a3018; }
+.btn-pause:hover:not(:disabled)    { background: #3e2818; border-color: var(--accent2); }
 .btn-reset    { background: var(--bg3); color: var(--text2); }
 .btn-reset:hover:not(:disabled)    { border-color: var(--err); color: var(--err); }
 .btn-download { background: var(--bg3); color: var(--text2); }
@@ -298,7 +299,7 @@ canvas.loss-chart { display: block; width: 100%; height: 180px; }
 
 /* ---- Resume bar ---- */
 .resume-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px;
-              background: #1a2a3a; border-radius: 6px; margin-bottom: 14px;
+              background: #1f2c3e; border-radius: 6px; margin-bottom: 14px;
               font-size: 0.82rem; color: var(--text2); }
 .resume-bar button { background: var(--bg3); border: 1px solid var(--border2); color: var(--text);
                      padding: 3px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
@@ -325,7 +326,7 @@ canvas.loss-chart { display: block; width: 100%; height: 180px; }
 .footer-nav a:hover { text-decoration: underline; }
 
 /* ---- CPU banner ---- */
-#cpu-banner { display: none; background: #2a2a1a; border-bottom: 1px solid var(--warn);
+#cpu-banner { display: none; background: #2e2818; border-bottom: 1px solid var(--warn);
               padding: 6px 20px; font-size: 0.78rem; color: var(--warn); flex-shrink: 0; }
 
 /* ---- Responsive — mobile wall ---- */
@@ -340,6 +341,91 @@ canvas.loss-chart { display: block; width: 100%; height: 180px; }
 }
 #mobile-msg h2 { font-size: 1.1rem; }
 #mobile-msg p  { color: var(--text2); font-size: 0.85rem; }
+
+/* ── b2 shell (Phase 2 — LoRA fine-tuning) ───────────────────── */
+#b2-shell { display: none; flex-direction: column; height: 100vh; background: var(--bg); overflow: hidden; }
+.b2-top-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 16px; height: 46px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.b2-status-badge {
+  font-size: 0.72rem; padding: 2px 8px; border-radius: 10px; font-family: var(--mono);
+  background: var(--surface); color: var(--text2);
+}
+.b2-status-badge.b2-running  { background: #1f2e18; color: var(--ok); }
+.b2-status-badge.b2-paused   { background: #2e2818; color: var(--warn); }
+.b2-status-badge.b2-done     { background: #1f2c3e; color: #4ab4d0; }
+.b2-status-badge.b2-error    { background: #2e1414; color: #e77; }
+.b2-status-badge.b2-loading  { background: #1a1a3a; color: #a8a; }
+.b2-body { display: flex; flex: 1; overflow: hidden; }
+.b2-left {
+  width: 300px; flex-shrink: 0; border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.b2-right { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.b2-section { border-bottom: 1px solid var(--border); padding: 12px 14px; flex-shrink: 0; }
+.b2-section-title {
+  font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--text3); margin-bottom: 8px;
+}
+.b2-model-row { display: flex; align-items: center; gap: 8px; }
+.b2-progress-bar-wrap { height: 3px; background: var(--surface); border-radius: 2px; margin-top: 6px; }
+.b2-progress-bar { height: 100%; background: var(--accent); border-radius: 2px; width: 0%; transition: width 0.2s; }
+.b2-progress-label { font-size: 0.68rem; color: var(--text3); font-family: var(--mono); margin-top: 3px; min-height: 14px; }
+.b2-doc-drop {
+  border: 1px dashed var(--border); border-radius: 6px; padding: 10px 12px;
+  cursor: pointer; text-align: center; font-size: 0.8rem; color: var(--text3); transition: border-color 0.15s;
+}
+.b2-doc-drop:hover, .b2-doc-drop.dragover { border-color: var(--accent); color: var(--accent); }
+.b2-doc-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.b2-doc-item { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; font-family: var(--mono); color: var(--text2); }
+.b2-doc-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.b2-doc-item-size { color: var(--text3); flex-shrink: 0; }
+.b2-doc-remove { background: none; border: none; color: var(--text3); cursor: pointer; font-size: 0.9rem; padding: 0 2px; line-height: 1; }
+.b2-doc-remove:hover { color: #e77; }
+.b2-doc-stats { font-size: 0.68rem; color: var(--text3); font-family: var(--mono); margin-top: 6px; }
+.b2-settings-overflow { overflow-y: auto; flex: 1; }
+.b2-settings-summary {
+  cursor: pointer; font-size: 0.78rem; color: var(--text2);
+  display: flex; align-items: center; justify-content: space-between; user-select: none;
+}
+.b2-settings-summary::after { content: '▸'; font-size: 0.65rem; color: var(--text3); }
+details[open] .b2-settings-summary::after { content: '▾'; }
+.b2-settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin-top: 10px; }
+.b2-setting-row { display: flex; flex-direction: column; gap: 3px; }
+.b2-setting-row label { font-size: 0.68rem; color: var(--text3); }
+.b2-setting-row input {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  border-radius: 4px; padding: 3px 6px; font-size: 0.78rem; font-family: var(--mono); width: 100%;
+}
+.b2-setting-row input:disabled { opacity: 0.5; }
+.b2-lora-targets { grid-column: 1 / -1; }
+.b2-lora-targets-label { font-size: 0.68rem; color: var(--text3); margin-bottom: 4px; }
+.b2-target-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.b2-chip {
+  font-size: 0.68rem; font-family: var(--mono); padding: 2px 7px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text2);
+  cursor: pointer; user-select: none; transition: all 0.12s;
+}
+.b2-chip.active { background: var(--accent); border-color: var(--accent); color: #000; }
+.b2-chip:hover:not(.active) { border-color: var(--accent); color: var(--accent); }
+.b2-controls { display: flex; flex-wrap: wrap; gap: 6px; }
+.b2-chart-wrap { padding: 12px 16px 4px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.b2-chart-title { font-size: 0.7rem; color: var(--text3); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+#b2-loss-canvas { width: 100%; height: 120px; display: block; }
+.b2-chart-meta { font-size: 0.68rem; color: var(--text3); font-family: var(--mono); min-height: 16px; padding-top: 2px; }
+.b2-samples-wrap { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.b2-samples-header {
+  padding: 8px 16px 4px; font-size: 0.7rem; text-transform: uppercase;
+  letter-spacing: 1px; color: var(--text3); flex-shrink: 0;
+}
+.b2-samples-list { flex: 1; overflow-y: auto; padding: 0 16px 12px; }
+.b2-sample-item {
+  padding: 8px 10px; border-left: 2px solid var(--border); margin-bottom: 8px;
+  font-size: 0.8rem; color: var(--text2); font-family: var(--mono); white-space: pre-wrap; word-break: break-word;
+}
+.b2-sample-meta { font-size: 0.65rem; color: var(--text3); margin-bottom: 4px; }
+.b2-samples-empty { color: var(--text3); font-size: 0.8rem; padding: 16px 0; }
 </style>
 </head>
 <body>
@@ -365,6 +451,10 @@ canvas.loss-chart { display: block; width: 100%; height: 180px; }
     <div class="landing-card" id="btn-free">
       <h2>Free mode</h2>
       <p>All three stages open from the start. Change any setting.</p>
+    </div>
+    <div class="landing-card" id="btn-b2">
+      <h2>b2 — LoRA fine-tuning</h2>
+      <p>Fine-tune SmolLM-135M on your documents with rank-8 LoRA. Load files, train, export adapters.</p>
     </div>
   </div>
 
@@ -589,6 +679,140 @@ canvas.loss-chart { display: block; width: 100%; height: 180px; }
 
 </div><!-- /app-shell -->
 
+<!-- b2 shell (Phase 2 — LoRA fine-tuning) -->
+<div id="b2-shell">
+  <div class="b2-top-bar">
+    <span class="top-brand"><span>Tapasya</span> <span style="font-weight:400;color:var(--text3);">/ b2</span></span>
+    <span id="b2-status-badge" class="b2-status-badge">idle</span>
+    <div class="top-spacer"></div>
+    <button class="btn" onclick="b2Back()">← Back</button>
+    <button class="btn" onclick="openHelp('b2')" title="Help">?</button>
+  </div>
+
+  <div class="b2-body">
+    <!-- Left column -->
+    <div class="b2-left">
+
+      <!-- Model -->
+      <div class="b2-section">
+        <div class="b2-section-title">Model</div>
+        <div class="b2-model-row">
+          <span style="font-size:0.8rem;font-family:var(--mono);flex:1;">SmolLM-135M</span>
+          <button class="btn" id="b2-load-model-btn" onclick="b2LoadModelClick()">Load</button>
+        </div>
+        <div class="b2-progress-bar-wrap"><div class="b2-progress-bar" id="b2-model-bar"></div></div>
+        <div class="b2-progress-label" id="b2-model-label">Not loaded</div>
+      </div>
+
+      <!-- Documents -->
+      <div class="b2-section">
+        <div class="b2-section-title">Documents</div>
+        <div class="b2-doc-drop" id="b2-doc-drop"
+             onclick="b2DocBrowse()"
+             ondragover="b2DragOver(event)"
+             ondragleave="b2DragLeave()"
+             ondrop="b2Drop(event)">
+          Drop .txt / .md files or click to browse
+        </div>
+        <div class="b2-doc-list" id="b2-doc-list"></div>
+        <div class="b2-doc-stats" id="b2-doc-stats"></div>
+        <input type="file" id="b2-file-input" accept=".txt,.md,.text" multiple
+               style="display:none" onchange="b2FilePicked(event)">
+      </div>
+
+      <!-- Settings -->
+      <div class="b2-section b2-settings-overflow">
+        <details id="b2-settings-details" open>
+          <summary class="b2-settings-summary">Settings</summary>
+          <div class="b2-settings-grid">
+            <div class="b2-setting-row">
+              <label>Steps</label>
+              <input type="number" id="b2-cfg-steps" value="100" min="1">
+            </div>
+            <div class="b2-setting-row">
+              <label>Batch (steps)</label>
+              <input type="number" id="b2-cfg-batch" value="10" min="1" max="200">
+            </div>
+            <div class="b2-setting-row" style="grid-column: 1 / -1">
+              <label>Method</label>
+              <select id="b2-cfg-method">
+                <option value="eggroll">EGGROLL (evolution)</option>
+                <option value="gradient">Gradient (Adam)</option>
+              </select>
+            </div>
+            <div class="b2-setting-row">
+              <label>Pop size</label>
+              <input type="number" id="b2-cfg-pop" value="8" min="2" step="2">
+            </div>
+            <div class="b2-setting-row">
+              <label>σ (sigma)</label>
+              <input type="number" id="b2-cfg-sigma" value="0.03" step="0.005">
+            </div>
+            <div class="b2-setting-row">
+              <label>LR</label>
+              <input type="number" id="b2-cfg-lr" value="0.001" step="0.0005">
+            </div>
+            <div class="b2-setting-row">
+              <label>LoRA rank</label>
+              <input type="number" id="b2-cfg-rank" value="8" min="1" max="64">
+            </div>
+            <div class="b2-setting-row">
+              <label>Alpha</label>
+              <input type="number" id="b2-cfg-alpha" value="16" min="1">
+            </div>
+            <div class="b2-setting-row">
+              <label>Seq len</label>
+              <input type="number" id="b2-cfg-seqlen" value="512" min="64" step="64">
+            </div>
+            <div class="b2-setting-row b2-lora-targets">
+              <div class="b2-lora-targets-label">LoRA targets</div>
+              <div class="b2-target-chips">
+                <span class="b2-chip active" data-target="q_proj">q_proj</span>
+                <span class="b2-chip" data-target="k_proj">k_proj</span>
+                <span class="b2-chip active" data-target="v_proj">v_proj</span>
+                <span class="b2-chip" data-target="o_proj">o_proj</span>
+                <span class="b2-chip active" data-target="down_proj">down_proj</span>
+                <span class="b2-chip" data-target="gate_proj">gate_proj</span>
+                <span class="b2-chip" data-target="up_proj">up_proj</span>
+              </div>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <!-- Controls -->
+      <div class="b2-section">
+        <div class="b2-controls">
+          <button class="btn btn-start"    id="b2-start-btn"  onclick="b2Start()"  disabled>Start</button>
+          <button class="btn btn-pause"    id="b2-pause-btn"  onclick="b2Pause()"  disabled>Pause</button>
+          <button class="btn btn-reset"    id="b2-reset-btn"  onclick="b2Reset()">Reset</button>
+          <button class="btn btn-download" id="b2-export-btn" onclick="b2Export()" disabled>Export</button>
+        </div>
+        <div class="status-line" id="b2-status-line"></div>
+      </div>
+
+    </div><!-- /b2-left -->
+
+    <!-- Right column -->
+    <div class="b2-right">
+
+      <div class="b2-chart-wrap">
+        <div class="b2-chart-title">Loss</div>
+        <canvas id="b2-loss-canvas" width="1200" height="120"></canvas>
+        <div class="b2-chart-meta" id="b2-chart-meta"></div>
+      </div>
+
+      <div class="b2-samples-wrap">
+        <div class="b2-samples-header">Generated samples (last 10)</div>
+        <div class="b2-samples-list" id="b2-samples-list">
+          <div class="b2-samples-empty">Samples appear after each training batch.</div>
+        </div>
+      </div>
+
+    </div><!-- /b2-right -->
+  </div><!-- /b2-body -->
+</div><!-- /b2-shell -->
+
 <!-- Help modal -->
 <div id="help-modal" style="display:none;" onclick="if(event.target===this)closeHelp()">
   <div class="help-box">
@@ -597,6 +821,7 @@ canvas.loss-chart { display: block; width: 100%; height: 180px; }
       <button class="help-tab active" data-tab="what" onclick="switchHelpTab('what')">What is this?</button>
       <button class="help-tab" data-tab="guided" onclick="switchHelpTab('guided')">Guided tour</button>
       <button class="help-tab" data-tab="free" onclick="switchHelpTab('free')">Free mode</button>
+      <button class="help-tab" data-tab="b2" onclick="switchHelpTab('b2')">b2 — LoRA</button>
     </div>
 
     <div class="help-content" id="help-what">
@@ -652,6 +877,34 @@ canvas.loss-chart { display: block; width: 100%; height: 180px; }
       <p>After any two stages have completed, the Compare button in the top bar activates. It generates text from all three models side-by-side with the same seed prompt — the clearest way to see what each addition buys.</p>
       <h4>Resuming and resetting</h4>
       <p>Checkpoints are saved every 50 steps. Use <strong>Reset</strong> on a stage to clear its checkpoint and start over from scratch.</p>
+    </div>
+
+    <div class="help-content" id="help-b2" style="display:none;">
+      <h3>b2 — LoRA fine-tuning</h3>
+      <p>b2 fine-tunes SmolLM-135M (135M parameters) on your documents using rank-8 LoRA adapters and the EGGROLL evolution-strategies algorithm — all in your browser, no backprop required.</p>
+      <h4>Workflow</h4>
+      <ol>
+        <li><strong>Load model</strong> — downloads SmolLM-135M once and caches it in browser Cache Storage (~540 MB). Subsequent loads are instant.</li>
+        <li><strong>Add documents</strong> — drop .txt or .md files. They're tokenized, chunked to the sequence length, shuffled, and split 90/10 train/val.</li>
+        <li><strong>Start training</strong> — EGGROLL perturbs and evaluates LoRA adapters every step. The loss chart updates after each batch.</li>
+        <li><strong>Export</strong> — save adapters as a .safetensors file in PEFT format, loadable by Hugging Face transformers.</li>
+      </ol>
+      <h4>Settings</h4>
+      <ul>
+        <li><strong>Steps</strong> — total training steps to run.</li>
+        <li><strong>Batch</strong> — steps per UI update cycle. Smaller = more responsive Pause; larger = slightly faster overall.</li>
+        <li><strong>Pop size</strong> — perturbation copies per step. Higher → better gradient signal, slower per step.</li>
+        <li><strong>σ / LR</strong> — perturbation scale and learning rate. Defaults (0.03 / 0.001) are conservative for LoRA.</li>
+        <li><strong>LoRA rank / alpha</strong> — rank 8, alpha 16 are standard starting points.</li>
+        <li><strong>LoRA targets</strong> — which projection matrices get adapters. Default: q_proj, v_proj, down_proj.</li>
+        <li><strong>Seq len</strong> — token window length for each training chunk (default 512).</li>
+      </ul>
+      <h4>Notes</h4>
+      <ul>
+        <li>Model download is ~540 MB and only happens once; subsequent opens use the browser cache.</li>
+        <li>Training runs on WebGPU. Falls back to CPU — expect roughly 10× slower per step.</li>
+        <li>Changing rank, alpha, or targets after loading resets adapters to zero on the next Start.</li>
+      </ul>
     </div>
   </div>
 </div>
@@ -924,6 +1177,132 @@ fn matmul_bt_add(@builtin(global_invocation_id) gid: vec3<u32>) {
     acc += f32_a[m * K + k] * f32_b[n * K + k];
   }
   f32_out[m * N + n] = f32_out[m * N + n] + scale * acc;
+}
+
+// ── 13. ce_softmax_grad ──────────────────────────────────────────
+// Backward through cross-entropy + softmax in one pass.
+// For t < T-1: dL/dlogits[t,v] = (softmax[v] - one_hot[tgt]) / (T-1)
+// For t = T-1: 0  (no real target at last LM position)
+// cfg: x=T  y=V;  f32_a=logits[T*V]  u32_a=targets[T]  f32_out=dL_dlogits[T*V]
+// Dispatch: T workgroups × @workgroup_size(256)
+var<workgroup> _ceg_max: array<f32, 256>;
+var<workgroup> _ceg_sum: array<f32, 256>;
+@compute @workgroup_size(256)
+fn ce_softmax_grad(
+  @builtin(local_invocation_id) lid: vec3<u32>,
+  @builtin(workgroup_id)        wid: vec3<u32>
+) {
+  let t = wid.x; let T = cfg.x; let V = cfg.y; let lx = lid.x;
+  if (t >= T) { return; }
+  if (t == T - 1u) {
+    var i: u32 = lx;
+    while (i < V) { f32_out[t * V + i] = 0.0f; i += 256u; }
+    return;
+  }
+  var lmax = -1.0e38f; var i: u32 = lx;
+  while (i < V) { lmax = max(lmax, f32_a[t * V + i]); i += 256u; }
+  _ceg_max[lx] = lmax; workgroupBarrier();
+  var s = 128u;
+  while (s > 0u) { if (lx < s) { _ceg_max[lx] = max(_ceg_max[lx], _ceg_max[lx + s]); } workgroupBarrier(); s = s >> 1u; }
+  let gmax = _ceg_max[0];
+  var lsum = 0.0f; i = lx;
+  while (i < V) { lsum += exp(f32_a[t * V + i] - gmax); i += 256u; }
+  _ceg_sum[lx] = lsum; workgroupBarrier();
+  s = 128u;
+  while (s > 0u) { if (lx < s) { _ceg_sum[lx] += _ceg_sum[lx + s]; } workgroupBarrier(); s = s >> 1u; }
+  let gsum = _ceg_sum[0];
+  let tgt = u32_a[t]; let inv_n = 1.0f / f32(T - 1u); i = lx;
+  while (i < V) {
+    let p  = exp(f32_a[t * V + i] - gmax) / gsum;
+    let oh = select(0.0f, 1.0f, i == tgt);
+    f32_out[t * V + i] = (p - oh) * inv_n;
+    i += 256u;
+  }
+}
+
+// ── 14. rmsnorm_backward ─────────────────────────────────────────
+// Backward through RMSNorm: y[d] = gamma[d] * x[d] / rms(x)
+// dx[d] = dy[d]*gamma[d]/rms - x[d] * dot(dy,gamma*x) / (D * rms^3)
+// cfg: x=T  y=D;  f32_a=x_in[T*D]  f32_b=gamma[D]  f32_c=dy[T*D]  f32_out=dx[T*D]
+// Dispatch: T workgroups × @workgroup_size(256)
+var<workgroup> _rn_rms2: array<f32, 256>;
+var<workgroup> _rn_s:    array<f32, 256>;
+@compute @workgroup_size(256)
+fn rmsnorm_backward(
+  @builtin(local_invocation_id) lid: vec3<u32>,
+  @builtin(workgroup_id)        wid: vec3<u32>
+) {
+  let t = wid.x; let T = cfg.x; let D = cfg.y; let lx = lid.x;
+  if (t >= T) { return; }
+  var lrms2 = 0.0f; var ls = 0.0f; var i: u32 = lx;
+  while (i < D) {
+    let xi = f32_a[t * D + i]; let dyi = f32_c[t * D + i];
+    lrms2 += xi * xi; ls += dyi * f32_b[i] * xi; i += 256u;
+  }
+  _rn_rms2[lx] = lrms2; _rn_s[lx] = ls; workgroupBarrier();
+  var s = 128u;
+  while (s > 0u) { if (lx < s) { _rn_rms2[lx] += _rn_rms2[lx + s]; _rn_s[lx] += _rn_s[lx + s]; } workgroupBarrier(); s = s >> 1u; }
+  let rms2    = _rn_rms2[0] / f32(D);
+  let rms     = sqrt(max(rms2, 1e-12f));
+  let S_raw   = _rn_s[0];
+  let inv_rms = 1.0f / rms;
+  let coeff   = S_raw / (f32(D) * rms2 * rms);
+  i = lx;
+  while (i < D) {
+    let xi = f32_a[t * D + i];
+    f32_out[t * D + i] = f32_c[t * D + i] * f32_b[i] * inv_rms - xi * coeff;
+    i += 256u;
+  }
+}
+
+// ── 15. swiglu_backward ──────────────────────────────────────────
+// Backward through SwiGLU: h = silu(gate)*up, silu(x) = x*sigmoid(x)
+// mode 0 (cfg.w=0): d/d(gate) = dy * up * sigma * (1 + gate*(1-sigma))
+// mode 1 (cfg.w=1): d/d(up)   = dy * gate * sigma
+// cfg: x=N  w=mode;  f32_a=dy[N]  f32_b=gate[N]  f32_c=up[N]  f32_out
+// Dispatch: ceil(N/64) × 1
+@compute @workgroup_size(64)
+fn swiglu_backward(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x; if (i >= cfg.x) { return; }
+  let dy = f32_a[i]; let gate = f32_b[i]; let up = f32_c[i];
+  let sig = 1.0f / (1.0f + exp(-gate));
+  if (cfg.w == 0u) {
+    f32_out[i] = dy * up   * sig * (1.0f + gate * (1.0f - sig));
+  } else {
+    f32_out[i] = dy * gate * sig;
+  }
+}
+
+// ── 16. lora_grad_A ──────────────────────────────────────────────
+// dA[r,d] = scale * sum_t tmp2[t,r] * x[t,d]
+// cfg: x=R(rank)  y=T  z=D(in_dim)  w=scaleBits
+// f32_a=tmp2[T*R]  f32_b=x[T*D]  f32_out=dA[R*D]
+// Dispatch: ceil(D/8) × ceil(R/8)
+@compute @workgroup_size(8, 8)
+fn lora_grad_A(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let d = gid.x; let r = gid.y;
+  let R = cfg.x; let T = cfg.y; let D = cfg.z;
+  if (r >= R || d >= D) { return; }
+  let scale = bitcast<f32>(cfg.w);
+  var acc = 0.0f;
+  for (var t = 0u; t < T; t++) { acc += f32_a[t * R + r] * f32_b[t * D + d]; }
+  f32_out[r * D + d] = scale * acc;
+}
+
+// ── 17. lora_grad_B ──────────────────────────────────────────────
+// dB[o,r] = scale * sum_t dy[t,o] * tmp[t,r]
+// cfg: x=O(out_dim)  y=T  z=R(rank)  w=scaleBits
+// f32_a=dy[T*O]  f32_b=tmp[T*R]  f32_out=dB[O*R]
+// Dispatch: ceil(R/8) × ceil(O/8)
+@compute @workgroup_size(8, 8)
+fn lora_grad_B(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let r = gid.x; let o = gid.y;
+  let O = cfg.x; let T = cfg.y; let R = cfg.z;
+  if (o >= O || r >= R) { return; }
+  let scale = bitcast<f32>(cfg.w);
+  var acc = 0.0f;
+  for (var t = 0u; t < T; t++) { acc += f32_a[t * O + o] * f32_b[t * R + r]; }
+  f32_out[o * R + r] = scale * acc;
 }
 `;
 
@@ -1586,8 +1965,13 @@ async function initWebGPU() {
       cross_entropy: mkPL('cross_entropy'),
       rms_norm:     mkPL('rms_norm'),
       rope:         mkPL('rope'),
-      silu_mul:     mkPL('silu_mul'),
-      matmul_bt_add: mkPL('matmul_bt_add'),
+      silu_mul:          mkPL('silu_mul'),
+      matmul_bt_add:     mkPL('matmul_bt_add'),
+      ce_softmax_grad:   mkPL('ce_softmax_grad'),
+      rmsnorm_backward:  mkPL('rmsnorm_backward'),
+      swiglu_backward:   mkPL('swiglu_backward'),
+      lora_grad_A:       mkPL('lora_grad_A'),
+      lora_grad_B:       mkPL('lora_grad_B'),
     };
 
     const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
@@ -2542,6 +2926,337 @@ async function b2EggrollTrainDocs(opts = {}) {
 }
 
 // ─────────────────────────────────────────────────────────────────
+// b2 backprop — gradient-based LoRA fine-tuning via WebGPU backward pass
+// Chunk B1: FFN layers (down_proj, gate_proj, up_proj); attention LoRA zero-grad (Chunk B2)
+// ─────────────────────────────────────────────────────────────────
+
+// Allocate backward-pass activation buffers and Adam state on all adapters.
+// Idempotent — safe to call multiple times; only allocates what is missing.
+function b2InitBackprop() {
+  if (!b2State) throw new Error('model not loaded');
+  if (!b2State.lora) throw new Error('LoRA not initialized — call b2:init_lora first');
+  const { device } = gpuCtx;
+  const { cfg, act } = b2State;
+  const lora = b2State.lora;
+
+  if (!act.bp_inited) {
+    const T = act.T;
+    const D = cfg.d_model;
+    const F = cfg.d_ff;
+    const V = cfg.vocab_size;
+    const L = cfg.n_layers;
+    const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+    const mkA = n => device.createBuffer({ size: Math.max(4, n * 4), usage: SC });
+
+    act.dL_dlogits  = mkA(T * V);
+    act.dL_dx       = mkA(T * D);
+    act.dL_dnorm    = mkA(T * D);
+    act.dL_dffh     = mkA(T * F);
+    act.dL_dffgate  = mkA(T * F);
+    act.dL_dffup    = mkA(T * F);
+    act.lora_tmp_b  = mkA(T * lora.rank);
+    act.bp_x_final  = mkA(T * D);
+    for (let l = 0; l < L; l++) act[`bp_pa_${l}`] = mkA(T * D);  // post-attention checkpoints
+    act.bp_inited   = true;
+  }
+
+  for (const a of lora.adapters.values()) {
+    if (!a.mA) {
+      a.mA = new Float32Array(a.A_cpu.length); a.vA = new Float32Array(a.A_cpu.length);
+      a.mB = new Float32Array(a.B_cpu.length); a.vB = new Float32Array(a.B_cpu.length);
+    }
+    if (!a.A_grad) {
+      const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+      a.A_grad = device.createBuffer({ size: Math.max(4, a.A_cpu.byteLength), usage: SC });
+      a.B_grad = device.createBuffer({ size: Math.max(4, a.B_cpu.byteLength), usage: SC });
+    }
+  }
+  return { ok: true };
+}
+
+// Forward pass that also stores residual-stream checkpoints for the backward pass.
+// Identical to b2ForwardLoss except it saves post-attention residuals and the pre-final-norm state.
+async function b2ForwardBackprop(tokens) {
+  if (!b2State) throw new Error('model not loaded');
+  const { cfg, weights, act, rope } = b2State;
+  const { device, bgl, pl: PL, df, du } = gpuCtx;
+
+  const T = tokens.length;
+  if (T < 2) throw new Error('need at least 2 tokens for next-token loss');
+  if (T > cfg.ctx_len) throw new Error(`T=${T} exceeds ctx_len=${cfg.ctx_len}`);
+
+  const D    = cfg.d_model;
+  const D_kv = act.D_kv;
+  const H    = cfg.n_heads;
+  const H_kv = cfg.n_kv_heads;
+  const F    = cfg.d_ff;
+  const V    = cfg.vocab_size;
+  const L    = cfg.n_layers;
+  const dh   = rope.dh;
+
+  const targets = new Uint32Array(T);
+  for (let i = 0; i < T - 1; i++) targets[i] = tokens[i + 1];
+  targets[T - 1] = 0;
+
+  const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+  const mkU32 = arr => {
+    const b = device.createBuffer({ size: Math.max(4, arr.length * 4), usage: SC, mappedAtCreation: true });
+    new Uint32Array(b.getMappedRange()).set(arr); b.unmap(); return b;
+  };
+  const tokBuf = mkU32(tokens);
+  const tgtBuf = mkU32(targets);
+
+  const enc = device.createCommandEncoder();
+  const c8  = n => Math.ceil(n / 8);
+  const c64 = n => Math.ceil(n / 64);
+  const go  = (pl, cfgArr, a, b, c, out, u32, dx, dy = 1) =>
+    gpuPass(enc, device, bgl, df, du, pl, cfgArr, a, b, c, out, u32, dx, dy);
+
+  const lora = b2State.lora;
+  const scaleBits = lora ? new Uint32Array(new Float32Array([lora.scale]).buffer)[0] : 0;
+  const applyLoRA = (target, layer, x, base_out, in_dim, out_dim) => {
+    if (!lora) return;
+    const a = lora.adapters.get(`layers.${layer}.${target}`);
+    if (!a) return;
+    const r = lora.rank;
+    go(PL.matmul_bt,     [T, in_dim, r],             x,            a.A, null, act.lora_tmp, null, c8(r),       c8(T));
+    go(PL.matmul_bt_add, [T, r, out_dim, scaleBits], act.lora_tmp, a.B, null, base_out,     null, c8(out_dim), c8(T));
+  };
+
+  let curX = act.x0, tmpX = act.x1;
+  go(PL.embed_add, [T, D], weights.get('model.embed_tokens.weight').buf, act.zeros, null, curX, tokBuf, c64(T * D));
+
+  for (let l = 0; l < L; l++) {
+    const W = k => weights.get(`model.layers.${l}.${k}`).buf;
+    go(PL.rms_norm,   [T, D],       curX,     W('input_layernorm.weight'),      null, act.norm, null, T);
+    go(PL.matmul_bt,  [T, D, D],    act.norm, W('self_attn.q_proj.weight'),     null, act.Q,    null, c8(D),    c8(T));
+    applyLoRA('q_proj', l, act.norm, act.Q,  D, D);
+    go(PL.matmul_bt,  [T, D, D_kv], act.norm, W('self_attn.k_proj.weight'),     null, act.K,    null, c8(D_kv), c8(T));
+    applyLoRA('k_proj', l, act.norm, act.K,  D, D_kv);
+    go(PL.matmul_bt,  [T, D, D_kv], act.norm, W('self_attn.v_proj.weight'),     null, act.Vb,   null, c8(D_kv), c8(T));
+    applyLoRA('v_proj', l, act.norm, act.Vb, D, D_kv);
+    go(PL.rope, [T, H,    dh], rope.cosBuf, rope.sinBuf, null, act.Q, null, H,    T);
+    go(PL.rope, [T, H_kv, dh], rope.cosBuf, rope.sinBuf, null, act.K, null, H_kv, T);
+    go(PL.causal_attn, [T, D, H, H_kv], act.Q, act.K, act.Vb, act.attn, null, H, T);
+    go(PL.matmul_bt,   [T, D, D],        act.attn, W('self_attn.o_proj.weight'), null, act.proj, null, c8(D), c8(T));
+    applyLoRA('o_proj', l, act.attn, act.proj, D, D);
+    go(PL.residual_add, [T * D], curX, act.proj, null, tmpX, null, c64(T * D));
+    [curX, tmpX] = [tmpX, curX];
+    enc.copyBufferToBuffer(curX, 0, act[`bp_pa_${l}`], 0, T * D * 4);  // checkpoint
+
+    go(PL.rms_norm,   [T, D],    curX,        W('post_attention_layernorm.weight'), null, act.norm,    null, T);
+    go(PL.matmul_bt,  [T, D, F], act.norm,    W('mlp.gate_proj.weight'),            null, act.ff_gate, null, c8(F), c8(T));
+    applyLoRA('gate_proj', l, act.norm, act.ff_gate, D, F);
+    go(PL.matmul_bt,  [T, D, F], act.norm,    W('mlp.up_proj.weight'),              null, act.ff_up,   null, c8(F), c8(T));
+    applyLoRA('up_proj', l, act.norm, act.ff_up, D, F);
+    go(PL.silu_mul,   [T * F],   act.ff_gate, act.ff_up,                            null, act.ff_h,    null, c64(T * F));
+    go(PL.matmul_bt,  [T, F, D], act.ff_h,    W('mlp.down_proj.weight'),            null, act.proj,    null, c8(D), c8(T));
+    applyLoRA('down_proj', l, act.ff_h, act.proj, F, D);
+    go(PL.residual_add, [T * D], curX, act.proj, null, tmpX, null, c64(T * D));
+    [curX, tmpX] = [tmpX, curX];
+  }
+
+  enc.copyBufferToBuffer(curX, 0, act.bp_x_final, 0, T * D * 4);  // pre-final-norm checkpoint
+
+  go(PL.rms_norm,     [T, D],    curX,     weights.get('model.norm.weight').buf,         null, act.norm,         null, T);
+  go(PL.matmul_bt,    [T, D, V], act.norm, weights.get('model.embed_tokens.weight').buf, null, act.logits,       null, c8(V), c8(T));
+  go(PL.cross_entropy,[T, V],    act.logits, null, null, act.perTokenLoss, tgtBuf, T);
+
+  const lossStage = device.createBuffer({ size: Math.max(16, T * 4), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  enc.copyBufferToBuffer(act.perTokenLoss, 0, lossStage, 0, T * 4);
+  device.queue.submit([enc.finish()]);
+  tokBuf.destroy(); tgtBuf.destroy();
+
+  b2State.bp_last_T       = T;
+  b2State.bp_last_targets = targets;
+
+  await lossStage.mapAsync(GPUMapMode.READ, 0, T * 4);
+  const losses = Array.from(new Float32Array(lossStage.getMappedRange(0, T * 4).slice(0)));
+  lossStage.unmap(); lossStage.destroy();
+
+  let sum = 0;
+  for (let i = 0; i < T - 1; i++) sum += losses[i];
+  return { mean_loss: sum / (T - 1), T };
+}
+
+// Backward pass: compute LoRA gradients for FFN adapters using skip-connection approximation.
+// Must be called immediately after b2ForwardBackprop (reuses act.logits and checkpoints).
+async function b2BackwardLoRA() {
+  if (!b2State?.lora) throw new Error('LoRA not initialized');
+  if (!b2State.bp_last_T) throw new Error('call b2ForwardBackprop first');
+
+  const { cfg, weights, act } = b2State;
+  const { device, bgl, pl: PL, df, du } = gpuCtx;
+  const lora = b2State.lora;
+
+  const T = b2State.bp_last_T;
+  const D = cfg.d_model;
+  const F = cfg.d_ff;
+  const V = cfg.vocab_size;
+  const L = cfg.n_layers;
+  const R = lora.rank;
+
+  const SC = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
+  const tgtBuf = device.createBuffer({ size: Math.max(4, T * 4), usage: SC, mappedAtCreation: true });
+  new Uint32Array(tgtBuf.getMappedRange()).set(b2State.bp_last_targets); tgtBuf.unmap();
+
+  const enc = device.createCommandEncoder();
+  const c8  = n => Math.ceil(n / 8);
+  const c64 = n => Math.ceil(n / 64);
+  const go  = (pl, cfgArr, a, b, c, out, u32, dx, dy = 1) =>
+    gpuPass(enc, device, bgl, df, du, pl, cfgArr, a, b, c, out, u32, dx, dy);
+
+  const scaleBits = new Uint32Array(new Float32Array([lora.scale]).buffer)[0];
+  const W_embed   = weights.get('model.embed_tokens.weight').buf;
+  const W_norm    = weights.get('model.norm.weight').buf;
+
+  // Step 1: dL/dlogits[T,V] via softmax backward
+  go(PL.ce_softmax_grad, [T, V, 0, 0], act.logits, null, null, act.dL_dlogits, tgtBuf, T, 1);
+
+  // Step 2: dL/d(final_norm_out)[T,D] = dL_dlogits[T,V] @ W_embed[V,D]
+  go(PL.matmul, [T, V, D, 0], act.dL_dlogits, W_embed, null, act.dL_dnorm, null, c8(D), c8(T));
+
+  // Step 3: rmsnorm backward on final norm → dL/d(x_L)[T,D]  (the upstream gradient)
+  go(PL.rmsnorm_backward, [T, D, 0, 0], act.bp_x_final, W_norm, act.dL_dnorm, act.dL_dx, null, T, 1);
+
+  // Step 4: per-layer FFN LoRA gradients (skip-connection approximation: dL/dx_l ≈ dL/dx_L)
+  for (let l = L - 1; l >= 0; l--) {
+    const W  = k => weights.get(`model.layers.${l}.${k}`).buf;
+    const pa = act[`bp_pa_${l}`];  // post-attention residual checkpoint
+
+    // Recompute FFN activations from checkpoint
+    go(PL.rms_norm,  [T, D],    pa,          W('post_attention_layernorm.weight'), null, act.norm,    null, T);
+    go(PL.matmul_bt, [T, D, F], act.norm,    W('mlp.gate_proj.weight'),            null, act.ff_gate, null, c8(F), c8(T));
+    go(PL.matmul_bt, [T, D, F], act.norm,    W('mlp.up_proj.weight'),              null, act.ff_up,   null, c8(F), c8(T));
+    go(PL.silu_mul,  [T * F],   act.ff_gate, act.ff_up,                            null, act.ff_h,    null, c64(T * F));
+
+    // dL/d(ff_h)[T,F] = dL_dx[T,D] @ W_down[D,F]
+    go(PL.matmul, [T, D, F, 0], act.dL_dx, W('mlp.down_proj.weight'), null, act.dL_dffh, null, c8(F), c8(T));
+
+    // SwiGLU backward → dL/d(gate) and dL/d(up)
+    go(PL.swiglu_backward, [T * F, 0, 0, 0], act.dL_dffh, act.ff_gate, act.ff_up, act.dL_dffgate, null, c64(T * F), 1);
+    go(PL.swiglu_backward, [T * F, 0, 0, 1], act.dL_dffh, act.ff_gate, act.ff_up, act.dL_dffup,   null, c64(T * F), 1);
+
+    const loraGrad = (target, dy, x, in_dim, out_dim) => {
+      const a = lora.adapters.get(`layers.${l}.${target}`);
+      if (!a?.A_grad) return;
+      go(PL.matmul_bt,  [T, in_dim, R],             x,              a.A, null, act.lora_tmp,   null, c8(R),       c8(T));
+      go(PL.lora_grad_B,[out_dim, T, R, scaleBits],  dy, act.lora_tmp,   null, a.B_grad,        null, c8(R),       c8(out_dim));
+      go(PL.matmul,     [T, out_dim, R, 0],          dy,             a.B, null, act.lora_tmp_b, null, c8(R),       c8(T));
+      go(PL.lora_grad_A,[R, T, in_dim, scaleBits],   act.lora_tmp_b, x,   null, a.A_grad,        null, c8(in_dim),  c8(R));
+    };
+
+    loraGrad('down_proj', act.dL_dx,     act.ff_h,  F, D);
+    loraGrad('gate_proj', act.dL_dffgate, act.norm,  D, F);
+    loraGrad('up_proj',   act.dL_dffup,   act.norm,  D, F);
+  }
+
+  device.queue.submit([enc.finish()]);
+  tgtBuf.destroy();
+}
+
+// Read back all LoRA gradients, apply Adam, write updated weights to GPU.
+async function b2AdamUpdate(lr, step, b1 = 0.9, b2c = 0.999, eps = 1e-8) {
+  const { device } = gpuCtx;
+  const lora = b2State.lora;
+
+  const readEnc  = device.createCommandEncoder();
+  const stagings = [];
+  for (const a of lora.adapters.values()) {
+    if (!a.A_grad) continue;
+    const sA = a.A_cpu.byteLength, sB = a.B_cpu.byteLength;
+    const stgA = device.createBuffer({ size: sA, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const stgB = device.createBuffer({ size: sB, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    readEnc.copyBufferToBuffer(a.A_grad, 0, stgA, 0, sA);
+    readEnc.copyBufferToBuffer(a.B_grad, 0, stgB, 0, sB);
+    stagings.push({ a, stgA, stgB, sA, sB });
+  }
+  device.queue.submit([readEnc.finish()]);
+
+  await Promise.all(stagings.flatMap(s => [
+    s.stgA.mapAsync(GPUMapMode.READ, 0, s.sA),
+    s.stgB.mapAsync(GPUMapMode.READ, 0, s.sB),
+  ]));
+
+  const b1p = Math.pow(b1,  step);
+  const b2p = Math.pow(b2c, step);
+
+  for (const { a, stgA, stgB, sA, sB } of stagings) {
+    const dA = new Float32Array(stgA.getMappedRange(0, sA).slice());
+    const dB = new Float32Array(stgB.getMappedRange(0, sB).slice());
+    stgA.unmap(); stgA.destroy();
+    stgB.unmap(); stgB.destroy();
+
+    for (let i = 0; i < a.A_cpu.length; i++) {
+      a.mA[i] = b1 * a.mA[i] + (1 - b1)  * dA[i];
+      a.vA[i] = b2c * a.vA[i] + (1 - b2c) * dA[i] * dA[i];
+      a.A_cpu[i] -= lr * (a.mA[i] / (1 - b1p)) / (Math.sqrt(a.vA[i] / (1 - b2p)) + eps);
+    }
+    for (let i = 0; i < a.B_cpu.length; i++) {
+      a.mB[i] = b1 * a.mB[i] + (1 - b1)  * dB[i];
+      a.vB[i] = b2c * a.vB[i] + (1 - b2c) * dB[i] * dB[i];
+      a.B_cpu[i] -= lr * (a.mB[i] / (1 - b1p)) / (Math.sqrt(a.vB[i] / (1 - b2p)) + eps);
+    }
+    device.queue.writeBuffer(a.A, 0, a.A_cpu);
+    device.queue.writeBuffer(a.B, 0, a.B_cpu);
+  }
+}
+
+// Full backprop training loop over document chunks — one forward+backward per step.
+async function b2BackpropTrainDocs(opts = {}) {
+  if (!b2DocsState) throw new Error('no docs loaded — call b2:load_docs first');
+  if (!b2State?.lora) throw new Error('LoRA not initialized');
+
+  const { trainChunks, valChunks } = b2DocsState;
+  if (trainChunks.length === 0) throw new Error('no training chunks');
+
+  const steps     = opts.steps     ?? 100;
+  const startStep = opts.startStep ?? 0;
+  const lr        = opts.lr        ?? 0.001;
+  const reqId     = opts._reqId;
+  const history   = [];
+
+  b2InitBackprop();
+
+  let initial_loss = null;
+  if (opts.measureInitial !== false) {
+    const r = await b2ForwardLoss(trainChunks[0]);
+    initial_loss = r.mean_loss;
+  }
+
+  const t0 = performance.now();
+  for (let s = 0; s < steps; s++) {
+    const stepIdx  = startStep + s;
+    const adamStep = stepIdx + 1;
+    const chunk    = trainChunks[stepIdx % trainChunks.length];
+
+    const fwd = await b2ForwardBackprop(chunk);
+    await b2BackwardLoRA();
+    await b2AdamUpdate(lr, adamStep);
+
+    history.push({ step: stepIdx, mean_loss: fwd.mean_loss, updated_loss: null });
+    post({ type: 'b2:training_progress', id: reqId,
+           step: stepIdx + 1, total: steps,
+           mean_pop_loss: fwd.mean_loss, updated_loss: null,
+           elapsed_ms: performance.now() - t0 });
+  }
+
+  let val_loss = null;
+  if (valChunks.length > 0) {
+    const r = await b2ForwardLoss(valChunks[0]);
+    val_loss = r.mean_loss;
+  }
+
+  const final_loss = history.at(-1)?.mean_loss ?? null;
+  return {
+    initial_loss, final_loss, val_loss,
+    delta: (final_loss ?? 0) - (initial_loss ?? 0),
+    steps: history.length, history,
+    elapsed_ms: performance.now() - t0,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────
 // b2 generation — naive (full forward per token, no KV cache) sampling loop
 // ─────────────────────────────────────────────────────────────────
 
@@ -3193,6 +3908,7 @@ function loraInitA(seed, tid, n_elements, fan_in) {
 async function b2InitLoRA(loraCfgIn = {}) {
   if (!b2State) throw new Error('model not loaded — call b2:load_model first');
   if (b2State.lora) await b2UnloadLoRA();
+  b2State.act.bp_inited = false;  // force reinit of backprop buffers on next call
   const { device } = gpuCtx;
   const { cfg, act } = b2State;
 
@@ -3263,13 +3979,15 @@ async function b2InitLoRA(loraCfgIn = {}) {
 async function b2UnloadLoRA() {
   if (!b2State || !b2State.lora) return { ok: true, hadLora: false };
   for (const a of b2State.lora.adapters.values()) {
-    a.A.destroy();
-    a.B.destroy();
+    a.A.destroy(); a.B.destroy();
+    if (a.A_grad) { a.A_grad.destroy(); a.A_grad = null; }
+    if (a.B_grad) { a.B_grad.destroy(); a.B_grad = null; }
   }
   if (b2State.act.lora_tmp) {
     b2State.act.lora_tmp.destroy();
     b2State.act.lora_tmp = null;
   }
+  b2State.act.bp_inited = false;
   b2State.lora = null;
   return { ok: true, hadLora: true };
 }
@@ -3700,8 +4418,10 @@ if (typeof self !== 'undefined') {
           else if (m.type === 'b2:docs_status')       data = b2DocsStatus();
           else if (m.type === 'b2:unload_docs')       data = b2UnloadDocs();
           else if (m.type === 'b2:sample_chunk')      data = b2SampleChunk(m.split || 'train', m.step || 0);
-          else if (m.type === 'b2:eggroll_train_docs') data = await b2EggrollTrainDocs({ ...(m.opts || {}), _reqId: m.id });
-          else if (m.type === 'b2:export_lora')       data = b2ExportLoRA(m.opts || {});
+          else if (m.type === 'b2:eggroll_train_docs')  data = await b2EggrollTrainDocs({ ...(m.opts || {}), _reqId: m.id });
+          else if (m.type === 'b2:backprop_train_docs') data = await b2BackpropTrainDocs({ ...(m.opts || {}), _reqId: m.id });
+          else if (m.type === 'b2:init_backprop')      data = b2InitBackprop();
+          else if (m.type === 'b2:export_lora')        data = b2ExportLoRA(m.opts || {});
           else throw new Error(`unknown b2 message: ${m.type}`);
           post({ type: 'b2:result', id: m.id, ok: true, data });
         } catch (err) {
@@ -3884,11 +4604,13 @@ window.tapasya.b2 = (() => {
       const pct = ((msg.loaded / msg.total) * 100).toFixed(0);
       console.log(`[b2] uploading tensors → GPU: ${msg.loaded} / ${msg.total} (${pct}%)`);
     }
+    window._b2OnModelProgress?.(msg);
   }
   function _onTrainingProgress(msg) {
     const dt = (msg.elapsed_ms / 1000).toFixed(1);
     const updated = msg.updated_loss !== null ? `→ ${msg.updated_loss.toFixed(4)}` : '';
     console.log(`[b2 train] step ${msg.step}/${msg.total}  pop_mean=${msg.mean_pop_loss.toFixed(4)} ${updated}  (${dt}s elapsed)`);
+    window._b2OnTrainProgress?.(msg);
   }
   function _onGenerationProgress(msg) {
     const dt = (msg.elapsed_ms / 1000).toFixed(1);
@@ -3936,7 +4658,9 @@ window.tapasya.b2 = (() => {
     docsStatus:       ()                      => send('b2:docs_status', {}),
     unloadDocs:       ()                      => send('b2:unload_docs', {}),
     sampleChunk:      (split = 'train', step = 0) => send('b2:sample_chunk', { split, step }),
-    eggrollTrainDocs: (opts = {})             => send('b2:eggroll_train_docs', { opts }),
+    eggrollTrainDocs:  (opts = {}) => send('b2:eggroll_train_docs',  { opts }),
+    backpropTrainDocs: (opts = {}) => send('b2:backprop_train_docs', { opts }),
+    initBackprop:      ()          => send('b2:init_backprop',       {}),
     exportLoRA: async (opts = {}) => {
       const result = await send('b2:export_lora', { opts });
       const blob = new Blob([result.buffer], { type: 'application/octet-stream' });
@@ -4504,8 +5228,9 @@ window.updateStageUI = function(stage) {
 window.switchStage = switchStage;
 
 // ---- Help modal ----
-window.openHelp = function() {
+window.openHelp = function(tab) {
   $('help-modal').style.display = 'flex';
+  if (tab) switchHelpTab(tab);
   saveHelpSeen();
 };
 window.closeHelp = function() {
@@ -4517,7 +5242,444 @@ window.switchHelpTab = function(tab) {
   $('help-what').style.display   = tab === 'what'   ? 'block' : 'none';
   $('help-guided').style.display = tab === 'guided' ? 'block' : 'none';
   $('help-free').style.display   = tab === 'free'   ? 'block' : 'none';
+  $('help-b2').style.display     = tab === 'b2'     ? 'block' : 'none';
 };
+
+// ── Phase 2 b2 UI ────────────────────────────────────────────────
+
+const B2 = {
+  modelLoaded: false,
+  tokenizerLoaded: false,
+  loraInited: false,
+  running: false,
+  paused: false,
+  step: 0,
+  totalSteps: 0,
+  lossHistory: [],
+  valLossHistory: [],
+  sampleHistory: [],
+  loadedDocs: [],
+  docStats: null,
+};
+
+function b2Enter() {
+  $('landing').style.display   = 'none';
+  $('app-shell').style.display = 'none';
+  $('b2-shell').style.display  = 'flex';
+  b2DrawChart();
+  b2UpdateUI();
+}
+
+function b2Back() {
+  if (B2.running && !confirm('Stop training and leave b2?')) return;
+  B2.running = false;
+  $('b2-shell').style.display = 'none';
+  $('landing').style.display  = 'flex';
+}
+
+// Model progress hook (called from b2 API's _onProgress)
+window._b2OnModelProgress = function(msg) {
+  const bar   = $('b2-model-bar');
+  const label = $('b2-model-label');
+  if (!bar || !label) return;
+  if (msg.stage === 'cache_hit') {
+    bar.style.width   = '100%';
+    label.textContent = 'Loaded from cache';
+  } else if (msg.stage === 'downloading' && msg.total > 0) {
+    const pct = (msg.loaded / msg.total) * 100;
+    bar.style.width   = `${pct.toFixed(1)}%`;
+    label.textContent = `Downloading… ${(msg.loaded/1048576).toFixed(0)} / ${(msg.total/1048576).toFixed(0)} MB (${pct.toFixed(0)}%)`;
+  } else if (msg.stage === 'cached') {
+    label.textContent = `Cached (${(msg.loaded/1048576).toFixed(0)} MB)`;
+  } else if (msg.stage === 'uploading') {
+    const pct = msg.total > 0 ? (msg.loaded / msg.total) * 100 : 0;
+    bar.style.width   = `${pct.toFixed(1)}%`;
+    label.textContent = `Uploading to GPU… ${pct.toFixed(0)}%`;
+  }
+};
+
+async function b2LoadModelClick() {
+  const btn   = $('b2-load-model-btn');
+  const label = $('b2-model-label');
+  const bar   = $('b2-model-bar');
+  btn.disabled      = true;
+  btn.textContent   = 'Loading…';
+  bar.style.width   = '0%';
+  label.textContent = 'Starting…';
+  b2SetStatus('loading', 'Loading model…');
+  try {
+    if (!B2.tokenizerLoaded) {
+      label.textContent = 'Loading tokenizer…';
+      await window.tapasya.b2.loadTokenizer();
+      B2.tokenizerLoaded = true;
+    }
+    label.textContent = 'Loading model weights…';
+    await window.tapasya.b2.loadModel();
+    B2.modelLoaded    = true;
+    bar.style.width   = '100%';
+    label.textContent = 'Model ready';
+    btn.textContent   = 'Loaded';
+    b2SetStatus('idle');
+  } catch (err) {
+    label.textContent = `Error: ${err.message || err}`;
+    btn.disabled      = false;
+    btn.textContent   = 'Retry';
+    b2SetStatus('error', `Load failed: ${err.message || err}`);
+  }
+  b2UpdateUI();
+}
+
+// ── Documents ─────────────────────────────────────────────────────
+
+function b2DocBrowse() { $('b2-file-input').click(); }
+function b2DragOver(e)  { e.preventDefault(); $('b2-doc-drop').classList.add('dragover'); }
+function b2DragLeave()  { $('b2-doc-drop').classList.remove('dragover'); }
+
+async function b2Drop(e) {
+  e.preventDefault();
+  $('b2-doc-drop').classList.remove('dragover');
+  await b2AddFiles(Array.from(e.dataTransfer.files));
+}
+
+async function b2FilePicked(e) {
+  await b2AddFiles(Array.from(e.target.files));
+  e.target.value = '';
+}
+
+async function b2AddFiles(files) {
+  const added = [];
+  for (const f of files) {
+    if (!f.name.match(/\.(txt|md|text)$/i)) continue;
+    added.push({ name: f.name, size: f.size, text: await f.text() });
+  }
+  if (!added.length) return;
+  B2.loadedDocs.push(...added);
+  b2RenderDocList();
+  await b2CommitDocs();
+}
+
+function b2RemoveDoc(idx) {
+  B2.loadedDocs.splice(idx, 1);
+  b2RenderDocList();
+  b2CommitDocs();
+}
+
+function b2RenderDocList() {
+  const list = $('b2-doc-list');
+  list.innerHTML = '';
+  B2.loadedDocs.forEach((d, i) => {
+    const item = document.createElement('div');
+    item.className = 'b2-doc-item';
+    item.innerHTML =
+      `<span class="b2-doc-item-name">${d.name}</span>` +
+      `<span class="b2-doc-item-size">${(d.size / 1024).toFixed(1)} KB</span>` +
+      `<button class="b2-doc-remove" onclick="b2RemoveDoc(${i})" title="Remove">×</button>`;
+    list.appendChild(item);
+  });
+}
+
+async function b2CommitDocs() {
+  const stats = $('b2-doc-stats');
+  if (!B2.loadedDocs.length) {
+    stats.textContent = '';
+    B2.docStats = null;
+    b2UpdateUI();
+    return;
+  }
+  if (!B2.tokenizerLoaded) {
+    stats.textContent = 'Load model first to tokenize documents.';
+    return;
+  }
+  stats.textContent = 'Tokenizing…';
+  try {
+    const seqLen = parseInt($('b2-cfg-seqlen').value) || 512;
+    const result = await window.tapasya.b2.loadDocs(
+      B2.loadedDocs.map(d => ({ name: d.name, text: d.text })),
+      { seqLen }
+    );
+    B2.docStats = result;
+    stats.textContent =
+      `${result.totalTokens.toLocaleString()} tokens · ${result.totalChunks} chunks · ` +
+      `train ${result.trainChunks} / val ${result.valChunks}`;
+  } catch (err) {
+    stats.textContent = `Error: ${err.message || err}`;
+  }
+  b2UpdateUI();
+}
+
+// LoRA target chip toggles
+document.querySelectorAll('.b2-chip').forEach(chip => {
+  chip.addEventListener('click', () => chip.classList.toggle('active'));
+});
+
+function b2GetTargets() {
+  return Array.from(document.querySelectorAll('.b2-chip.active')).map(c => c.dataset.target);
+}
+
+// ── Training ──────────────────────────────────────────────────────
+
+async function b2Start() {
+  if (!B2.modelLoaded) { b2Toast('Load model first.'); return; }
+  if (!B2.docStats)    { b2Toast('Add documents first.'); return; }
+  const targets = b2GetTargets();
+  if (!targets.length) { b2Toast('Select at least one LoRA target.'); return; }
+
+  const rank  = parseInt($('b2-cfg-rank').value)   || 8;
+  const alpha = parseInt($('b2-cfg-alpha').value)  || 16;
+  const steps = parseInt($('b2-cfg-steps').value)  || 100;
+  const batch = parseInt($('b2-cfg-batch').value)  || 10;
+
+  if (!B2.loraInited) {
+    b2SetStatus('loading', 'Initialising LoRA…');
+    try {
+      await window.tapasya.b2.initLoRA({ rank, alpha, targets });
+      B2.loraInited = true;
+    } catch (err) {
+      b2SetStatus('error', `LoRA init failed: ${err.message || err}`);
+      return;
+    }
+  }
+
+  B2.running    = true;
+  B2.paused     = false;
+  B2.totalSteps = B2.step + steps;
+  b2DisableSettings(true);
+  b2UpdateUI();
+  b2SetStatus('running', `Training… step ${B2.step} / ${B2.totalSteps}`);
+  b2TrainNextBatch(batch);
+}
+
+async function b2TrainNextBatch(batchSize) {
+  if (!B2.running || B2.paused) return;
+  if (B2.step >= B2.totalSteps) {
+    B2.running = false;
+    b2DisableSettings(false);
+    b2UpdateUI();
+    const fl = B2.lossHistory.at(-1)?.loss;
+    b2SetStatus('done', `Done — ${B2.step} steps${fl != null ? `, loss ${fl.toFixed(4)}` : ''}`);
+    return;
+  }
+
+  const method = $('b2-cfg-method')?.value || 'eggroll';
+  const lr    = parseFloat($('b2-cfg-lr').value)    || 0.001;
+  const stepsThisBatch = Math.min(batchSize, B2.totalSteps - B2.step);
+
+  try {
+    let result;
+    if (method === 'gradient') {
+      result = await window.tapasya.b2.backpropTrainDocs({
+        steps: stepsThisBatch,
+        startStep: B2.step,
+        lr,
+      });
+    } else {
+      const pop   = parseInt($('b2-cfg-pop').value)     || 8;
+      const sigma = parseFloat($('b2-cfg-sigma').value) || 0.03;
+      result = await window.tapasya.b2.eggrollTrainDocs({
+        steps: stepsThisBatch,
+        startStep: B2.step,
+        pop_size: pop,
+        sigma,
+        lr,
+      });
+    }
+
+    B2.step += result.steps;
+
+    if (result.history?.length) {
+      for (const h of result.history) {
+        B2.lossHistory.push({ step: h.step + 1, loss: h.updated_loss ?? h.mean_pop_loss ?? h.mean_loss });
+      }
+    } else if (result.final_loss != null) {
+      B2.lossHistory.push({ step: B2.step, loss: result.final_loss });
+    }
+    if (result.val_loss != null) {
+      B2.valLossHistory.push({ step: B2.step, loss: result.val_loss });
+    }
+
+    b2DrawChart();
+    b2UpdateChartMeta(result);
+    b2GenSample(result);
+    b2SetStatus('running', `Training… step ${B2.step} / ${B2.totalSteps}`);
+    b2UpdateUI();
+    // setTimeout so Pause can intercept before next batch starts
+    setTimeout(() => b2TrainNextBatch(batchSize), 0);
+  } catch (err) {
+    B2.running = false;
+    b2DisableSettings(false);
+    b2UpdateUI();
+    b2SetStatus('error', `Training error: ${err.message || err}`);
+  }
+}
+
+async function b2GenSample(result) {
+  try {
+    // 'In the ' encodes to ≥2 tokens — satisfies b2ForwardLoss T≥2 requirement
+    const sample = await window.tapasya.b2.generate('In the ', { max_new_tokens: 60 });
+    const text = sample.generated_text || '';
+    B2.sampleHistory.unshift({ step: B2.step, loss: result.final_loss, text });
+    if (B2.sampleHistory.length > 10) B2.sampleHistory.pop();
+    b2RenderSamples();
+  } catch {}
+}
+
+function b2Pause() {
+  if (!B2.running) return;
+  B2.paused = !B2.paused;
+  if (B2.paused) {
+    b2SetStatus('paused', `Paused at step ${B2.step}`);
+    $('b2-pause-btn').textContent = 'Resume';
+  } else {
+    $('b2-pause-btn').textContent = 'Pause';
+    b2SetStatus('running', `Training… step ${B2.step} / ${B2.totalSteps}`);
+    const batchSize = parseInt($('b2-cfg-batch').value) || 10;
+    b2TrainNextBatch(batchSize);
+  }
+  b2UpdateUI();
+}
+
+function b2Reset() {
+  if (B2.running && !confirm('Stop training and reset LoRA adapters?')) return;
+  const wasInited = B2.loraInited;
+  B2.running        = false;
+  B2.paused         = false;
+  B2.step           = 0;
+  B2.totalSteps     = 0;
+  B2.lossHistory    = [];
+  B2.valLossHistory = [];
+  B2.sampleHistory  = [];
+  B2.loraInited     = false;
+  b2DisableSettings(false);
+  b2DrawChart();
+  b2RenderSamples();
+  b2SetStatus('idle');
+  b2UpdateUI();
+  if (wasInited) window.tapasya.b2.resetAdapters().catch(() => {});
+}
+
+async function b2Export() {
+  try {
+    b2SetStatus('exporting', 'Exporting LoRA adapters…');
+    const result = await window.tapasya.b2.exportLoRA();
+    b2SetStatus('done', `Exported ${result.filename} (${(result.bytes/1024).toFixed(1)} KB, ${result.tensorCount} tensors)`);
+    b2Toast(`Saved ${result.filename}`);
+  } catch (err) {
+    b2SetStatus('error', `Export failed: ${err.message || err}`);
+  }
+}
+
+// ── Chart ─────────────────────────────────────────────────────────
+
+function b2DrawChart() {
+  const canvas = $('b2-loss-canvas');
+  if (!canvas) return;
+  const W = canvas.width, H = canvas.height;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+  const all = B2.lossHistory;
+  if (!all.length) {
+    ctx.fillStyle = '#555';
+    ctx.font = '20px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Loss chart appears here', W / 2, H / 2);
+    return;
+  }
+  const minL = Math.min(...all.map(p => p.loss));
+  const maxL = Math.max(...all.map(p => p.loss));
+  const pad  = { t: 10, b: 20, l: 46, r: 10 };
+  const gW = W - pad.l - pad.r;
+  const gH = H - pad.t - pad.b;
+  const span = maxL - minL || 1;
+  const xOf = i => pad.l + (i / (all.length - 1 || 1)) * gW;
+  const yOf = v => pad.t + (1 - (v - minL) / span) * gH;
+  ctx.strokeStyle = '#333'; ctx.lineWidth = 0.5;
+  [0, 0.25, 0.5, 0.75, 1].forEach(t => {
+    const y = pad.t + t * gH;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    ctx.fillStyle = '#666'; ctx.font = '14px monospace'; ctx.textAlign = 'right';
+    ctx.fillText((maxL - t * span).toFixed(2), pad.l - 4, y + 4);
+  });
+  ctx.strokeStyle = '#4ecca3'; ctx.lineWidth = 2; ctx.beginPath();
+  all.forEach((p, i) => {
+    i === 0 ? ctx.moveTo(xOf(i), yOf(p.loss)) : ctx.lineTo(xOf(i), yOf(p.loss));
+  });
+  ctx.stroke();
+  if (B2.valLossHistory.length > 1) {
+    const maxStep = all.at(-1).step || 1;
+    ctx.strokeStyle = '#7ab4d0'; ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 4]); ctx.beginPath();
+    B2.valLossHistory.forEach((p, i) => {
+      const x = pad.l + (p.step / maxStep) * gW;
+      const y = yOf(Math.min(Math.max(p.loss, minL), maxL));
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+}
+
+function b2UpdateChartMeta(result) {
+  const el = $('b2-chart-meta');
+  if (!el) return;
+  const parts = [`step ${B2.step}`];
+  if (result.final_loss != null) parts.push(`train ${result.final_loss.toFixed(4)}`);
+  if (result.val_loss   != null) parts.push(`val ${result.val_loss.toFixed(4)}`);
+  if (result.delta      != null) parts.push(`Δ ${result.delta > 0 ? '+' : ''}${result.delta.toFixed(4)}`);
+  el.textContent = parts.join('  ·  ');
+}
+
+// ── Samples ───────────────────────────────────────────────────────
+
+function b2RenderSamples() {
+  const list = $('b2-samples-list');
+  if (!list) return;
+  if (!B2.sampleHistory.length) {
+    list.innerHTML = '<div class="b2-samples-empty">Samples appear after each training batch.</div>';
+    return;
+  }
+  list.innerHTML = B2.sampleHistory.map(s =>
+    `<div class="b2-sample-item">` +
+    `<div class="b2-sample-meta">step ${s.step}${s.loss != null ? `  ·  loss ${s.loss.toFixed(4)}` : ''}</div>` +
+    `${s.text.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</div>`
+  ).join('');
+}
+
+// ── UI helpers ────────────────────────────────────────────────────
+
+function b2SetStatus(state, msg) {
+  const badge = $('b2-status-badge');
+  const line  = $('b2-status-line');
+  if (badge) { badge.textContent = state; badge.className = `b2-status-badge b2-${state}`; }
+  if (line)  line.textContent = msg || '';
+}
+
+function b2UpdateUI() {
+  const ready   = B2.modelLoaded && B2.tokenizerLoaded;
+  const hasDocs = !!B2.docStats;
+  $('b2-start-btn').disabled  = !ready || !hasDocs || B2.running;
+  $('b2-pause-btn').disabled  = !B2.running;
+  $('b2-export-btn').disabled = !B2.loraInited;
+  $('b2-reset-btn').disabled  = false;
+}
+
+function b2DisableSettings(disabled) {
+  ['b2-cfg-steps','b2-cfg-batch','b2-cfg-method','b2-cfg-pop','b2-cfg-sigma',
+   'b2-cfg-lr','b2-cfg-rank','b2-cfg-alpha','b2-cfg-seqlen'].forEach(id => {
+    const el = $(id); if (el) el.disabled = disabled;
+  });
+  document.querySelectorAll('.b2-chip').forEach(c => {
+    c.style.pointerEvents = disabled ? 'none' : '';
+    c.style.opacity = disabled ? '0.5' : '';
+  });
+}
+
+function b2Toast(msg) {
+  const t = $('toast'); if (!t) return;
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+// Landing card handler
+$('btn-b2')?.addEventListener('click', () => b2Enter());
 
 async function saveHelpSeen() {
   try {
